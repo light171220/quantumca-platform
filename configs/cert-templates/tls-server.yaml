@@ -1,0 +1,35 @@
+name: "TLS Server Certificate"
+description: "Standard TLS server certificate for web servers and APIs"
+
+subject:
+  organizational_unit: "TLS Server Certificate"
+  
+validity:
+  default_days: 365
+  max_days: 1095
+  
+key_usage:
+  - "digital_signature"
+  - "key_encipherment"
+  
+extended_key_usage:
+  - "server_auth"
+  
+basic_constraints:
+  ca: false
+  
+algorithms:
+  primary: "dilithium2"
+  secondary: "falcon512"
+  
+validation_required:
+  - "domain_ownership"
+  
+certificate_transparency:
+  enabled: true
+  
+revocation:
+  crl_distribution_points:
+    - "http://crl.quantumca.com/intermediate.crl"
+  ocsp_responder:
+    - "http://ocsp.quantumca.com"

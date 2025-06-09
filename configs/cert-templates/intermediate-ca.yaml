@@ -1,0 +1,47 @@
+name: "Intermediate CA Certificate"
+description: "Intermediate Certificate Authority for Tier 2+ customers"
+
+subject:
+  organizational_unit: "Intermediate Certificate Authority"
+  
+validity:
+  default_days: 1825
+  max_days: 3650
+  
+key_usage:
+  - "digital_signature"
+  - "cert_sign"
+  - "crl_sign"
+  
+basic_constraints:
+  ca: true
+  path_length: 0
+  
+algorithms:
+  primary: "dilithium3"
+  secondary: "falcon1024"
+  
+validation_required:
+  - "extended_validation"
+  - "legal_entity_verification"
+  
+certificate_transparency:
+  enabled: true
+  
+revocation:
+  crl_distribution_points:
+    - "http://crl.quantumca.com/root.crl"
+  ocsp_responder:
+    - "http://ocsp.quantumca.com"
+    
+policies:
+  certificate_policy_oid: "1.2.3.4.5.6.7.8.1"
+  cps_uri: "https://quantumca.com/cps"
+  
+constraints:
+  name_constraints:
+    permitted_dns_domains:
+      - ".customer-domain.com"
+    excluded_dns_domains:
+      - ".gov"
+      - ".mil"

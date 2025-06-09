@@ -1,0 +1,88 @@
+server:
+  port: 8080
+  host: "0.0.0.0"
+  
+database:
+  path: "./data/database.db"
+  
+storage:
+  keys_path: "./data/keys"
+  certificates_path: "./data/certificates"
+  
+ca:
+  root_ca:
+    validity_days: 7300
+    algorithms:
+      - "dilithium5"
+      - "falcon1024"
+      - "sphincs-sha256-256f"
+  
+  intermediate_ca:
+    validity_days: 1825
+    algorithms:
+      - "dilithium3"
+      - "falcon512"
+  
+  end_entity:
+    validity_days: 365
+    algorithms:
+      - "dilithium2"
+      - "falcon512"
+
+ocsp:
+  port: 8081
+  responder_url: "http://localhost:8081/ocsp"
+  response_validity_hours: 24
+
+validation:
+  domain_timeout: 300
+  methods:
+    - "dns-txt"
+    - "http-file"
+  
+logging:
+  level: "info"
+  format: "json"
+  
+security:
+  key_storage:
+    encryption: true
+    passphrase_env: "CA_PASSPHRASE"
+  
+  rate_limiting:
+    enabled: true
+    requests_per_minute: 100
+  
+  cors:
+    enabled: true
+    allowed_origins:
+      - "http://localhost:3000"
+      - "https://ca.example.com"
+
+tiers:
+  tier1:
+    name: "Direct Certificates"
+    max_certificates: 100
+    validity_days: 365
+    features:
+      - "domain_validation"
+      - "basic_support"
+  
+  tier2:
+    name: "Intermediate CA"
+    max_certificates: 1000
+    validity_days: 365
+    features:
+      - "intermediate_ca"
+      - "extended_validation"
+      - "priority_support"
+  
+  tier3:
+    name: "Private Root CA"
+    max_certificates: -1
+    validity_days: 365
+    features:
+      - "private_root_ca"
+      - "air_gapped_operations"
+      - "custom_policies"
+      - "dedicated_support"
