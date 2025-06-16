@@ -1,13 +1,18 @@
 package main
 
 import (
+	"context"
 	"log"
+	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"quantumca-platform/internal/api"
+	"quantumca-platform/internal/ocsp"
 	"quantumca-platform/internal/storage"
 	"quantumca-platform/internal/utils"
-	"quantumca-platform/internal/ocsp"
 )
 
 func main() {
@@ -36,14 +41,39 @@ func main() {
 	}()
 
 	server := api.NewServer(db, config, logger)
-	
+
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
 	}
 
-	logger.Info("Starting QuantumCA API server on port", port)
-	if err := server.Start(":" + port); err != nil {
-		logger.Fatal("Server failed to start:", err)
+	httpServer := &http.Server{
+		Addr:         ":" + port,
+		Handler:      server,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 15 * time.Second,
+		IdleTimeout:  60 * time.Second,
 	}
+
+	go func() {
+		logger.Infof("Starting QuantumCA API server on port %s", port)
+		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.Fatal("Server failed to start:", err)
+		}
+	}()
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+
+	logger.Info("Shutting down server...")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := httpServer.Shutdown(ctx); err != nil {
+		logger.Error("Server forced to shutdown:", err)
+	}
+
+	logger.Info("Server exited")
 }

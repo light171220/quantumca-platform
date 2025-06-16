@@ -1,9 +1,9 @@
 package pq
 
 import (
-	"crypto/rand"
 	"fmt"
 
+	"github.com/cloudflare/circl/kem"
 	"github.com/cloudflare/circl/kem/kyber/kyber512"
 	"github.com/cloudflare/circl/kem/kyber/kyber768"
 	"github.com/cloudflare/circl/kem/kyber/kyber1024"
@@ -11,130 +11,155 @@ import (
 
 type KyberPrivateKey struct {
 	Mode       string
-	PrivateKey interface{}
+	PrivateKey kem.PrivateKey
+	publicKey  *KyberPublicKey
 }
 
 type KyberPublicKey struct {
 	Mode      string
-	PublicKey interface{}
+	PublicKey kem.PublicKey
 }
 
 func GenerateKyberKey(mode string) (*KyberPrivateKey, error) {
+	var scheme kem.Scheme
+	
 	switch mode {
 	case "kyber512":
-		pub, priv, err := kyber512.GenerateKey(rand.Reader)
-		if err != nil {
-			return nil, fmt.Errorf("failed to generate Kyber512 key: %v", err)
-		}
-		return &KyberPrivateKey{
-			Mode:       mode,
-			PrivateKey: priv,
-		}, nil
+		scheme = kyber512.Scheme()
 	case "kyber768":
-		pub, priv, err := kyber768.GenerateKey(rand.Reader)
-		if err != nil {
-			return nil, fmt.Errorf("failed to generate Kyber768 key: %v", err)
-		}
-		return &KyberPrivateKey{
-			Mode:       mode,
-			PrivateKey: priv,
-		}, nil
+		scheme = kyber768.Scheme()
 	case "kyber1024":
-		pub, priv, err := kyber1024.GenerateKey(rand.Reader)
-		if err != nil {
-			return nil, fmt.Errorf("failed to generate Kyber1024 key: %v", err)
-		}
-		return &KyberPrivateKey{
-			Mode:       mode,
-			PrivateKey: priv,
-		}, nil
+		scheme = kyber1024.Scheme()
 	default:
 		return nil, fmt.Errorf("unsupported Kyber mode: %s", mode)
 	}
+
+	pub, priv, err := scheme.GenerateKeyPair()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate %s key: %w", mode, err)
+	}
+
+	return &KyberPrivateKey{
+		Mode:       mode,
+		PrivateKey: priv,
+		publicKey: &KyberPublicKey{
+			Mode:      mode,
+			PublicKey: pub,
+		},
+	}, nil
 }
 
 func (k *KyberPrivateKey) Public() interface{} {
-	switch k.Mode {
-	case "kyber512":
-		priv := k.PrivateKey.(*kyber512.PrivateKey)
-		return &KyberPublicKey{
+	if k == nil {
+		return nil
+	}
+	
+	if k.publicKey != nil {
+		return k.publicKey
+	}
+
+	if k.PrivateKey != nil {
+		k.publicKey = &KyberPublicKey{
 			Mode:      k.Mode,
-			PublicKey: priv.Public().(*kyber512.PublicKey),
-		}
-	case "kyber768":
-		priv := k.PrivateKey.(*kyber768.PrivateKey)
-		return &KyberPublicKey{
-			Mode:      k.Mode,
-			PublicKey: priv.Public().(*kyber768.PublicKey),
-		}
-	case "kyber1024":
-		priv := k.PrivateKey.(*kyber1024.PrivateKey)
-		return &KyberPublicKey{
-			Mode:      k.Mode,
-			PublicKey: priv.Public().(*kyber1024.PublicKey),
+			PublicKey: k.PrivateKey.Public(),
 		}
 	}
-	return nil
+	
+	return k.publicKey
 }
 
 func (k *KyberPrivateKey) Decapsulate(ciphertext []byte) ([]byte, error) {
-	switch k.Mode {
-	case "kyber512":
-		priv := k.PrivateKey.(*kyber512.PrivateKey)
-		return kyber512.Decapsulate(priv, ciphertext)
-	case "kyber768":
-		priv := k.PrivateKey.(*kyber768.PrivateKey)
-		return kyber768.Decapsulate(priv, ciphertext)
-	case "kyber1024":
-		priv := k.PrivateKey.(*kyber1024.PrivateKey)
-		return kyber1024.Decapsulate(priv, ciphertext)
-	default:
-		return nil, fmt.Errorf("unsupported Kyber mode: %s", k.Mode)
+	if k == nil || k.PrivateKey == nil {
+		return nil, fmt.Errorf("invalid private key")
 	}
+	
+	if len(ciphertext) == 0 {
+		return nil, fmt.Errorf("ciphertext cannot be empty")
+	}
+
+	scheme := k.PrivateKey.Scheme()
+	return scheme.Decapsulate(k.PrivateKey, ciphertext)
 }
 
 func (k *KyberPublicKey) Encapsulate() ([]byte, []byte, error) {
-	switch k.Mode {
-	case "kyber512":
-		pub := k.PublicKey.(*kyber512.PublicKey)
-		return kyber512.Encapsulate(pub, rand.Reader)
-	case "kyber768":
-		pub := k.PublicKey.(*kyber768.PublicKey)
-		return kyber768.Encapsulate(pub, rand.Reader)
-	case "kyber1024":
-		pub := k.PublicKey.(*kyber1024.PublicKey)
-		return kyber1024.Encapsulate(pub, rand.Reader)
-	default:
-		return nil, nil, fmt.Errorf("unsupported Kyber mode: %s", k.Mode)
+	if k == nil || k.PublicKey == nil {
+		return nil, nil, fmt.Errorf("invalid public key")
 	}
-}512.PublicKey; Priv *kyber512.PrivateKey })
-		return kyber512.Decapsulate(keypair.Priv, ciphertext), nil
-	case "kyber768":
-		keypair := k.PrivateKey.(*struct{ Pub *kyber768.PublicKey; Priv *kyber768.PrivateKey })
-		return kyber768.Decapsulate(keypair.Priv, ciphertext), nil
-	case "kyber1024":
-		keypair := k.PrivateKey.(*struct{ Pub *kyber1024.PublicKey; Priv *kyber1024.PrivateKey })
-		return kyber1024.Decapsulate(keypair.Priv, ciphertext), nil
-	default:
-		return nil, fmt.Errorf("unsupported Kyber mode: %s", k.Mode)
-	}
+	
+	scheme := k.PublicKey.Scheme()
+	return scheme.Encapsulate(k.PublicKey)
 }
 
-func (k *KyberPublicKey) Encapsulate() ([]byte, []byte, error) {
-	switch k.Mode {
-	case "kyber512":
-		pub := k.PublicKey.(*kyber512.PublicKey)
-		ciphertext, sharedSecret := kyber512.Encapsulate(pub, rand.Reader)
-		return ciphertext, sharedSecret, nil
-	case "kyber768":
-		pub := k.PublicKey.(*kyber768.PublicKey)
-		ciphertext, sharedSecret := kyber768.Encapsulate(pub, rand.Reader)
-		return ciphertext, sharedSecret, nil
-	case "kyber1024":
-		pub := k.PublicKey.(*kyber1024.PublicKey)
-		ciphertext, sharedSecret := kyber1024.Encapsulate(pub, rand.Reader)
-		return ciphertext, sharedSecret, nil
-	default:
-		return nil, nil, fmt.Errorf("unsupported Kyber mode: %s", k.Mode)
+func (k *KyberPrivateKey) Bytes() ([]byte, error) {
+	if k == nil || k.PrivateKey == nil {
+		return nil, fmt.Errorf("invalid private key")
 	}
+	
+	return k.PrivateKey.MarshalBinary()
+}
+
+func (k *KyberPublicKey) Bytes() ([]byte, error) {
+	if k == nil || k.PublicKey == nil {
+		return nil, fmt.Errorf("invalid public key")
+	}
+	
+	return k.PublicKey.MarshalBinary()
+}
+
+func parseKyberPrivateKey(mode string, keyData []byte) (*KyberPrivateKey, error) {
+	if len(keyData) == 0 {
+		return nil, fmt.Errorf("empty key data")
+	}
+	
+	var scheme kem.Scheme
+	
+	switch mode {
+	case "kyber512":
+		scheme = kyber512.Scheme()
+	case "kyber768":
+		scheme = kyber768.Scheme()
+	case "kyber1024":
+		scheme = kyber1024.Scheme()
+	default:
+		return nil, fmt.Errorf("unsupported Kyber mode: %s", mode)
+	}
+
+	priv, err := scheme.UnmarshalBinaryPrivateKey(keyData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal %s private key: %w", mode, err)
+	}
+
+	return &KyberPrivateKey{
+		Mode:       mode,
+		PrivateKey: priv,
+	}, nil
+}
+
+func parseKyberPublicKey(mode string, keyData []byte) (*KyberPublicKey, error) {
+	if len(keyData) == 0 {
+		return nil, fmt.Errorf("empty key data")
+	}
+	
+	var scheme kem.Scheme
+	
+	switch mode {
+	case "kyber512":
+		scheme = kyber512.Scheme()
+	case "kyber768":
+		scheme = kyber768.Scheme()
+	case "kyber1024":
+		scheme = kyber1024.Scheme()
+	default:
+		return nil, fmt.Errorf("unsupported Kyber mode: %s", mode)
+	}
+
+	pub, err := scheme.UnmarshalBinaryPublicKey(keyData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal %s public key: %w", mode, err)
+	}
+
+	return &KyberPublicKey{
+		Mode:      mode,
+		PublicKey: pub,
+	}, nil
 }

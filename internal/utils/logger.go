@@ -1,81 +1,140 @@
 package utils
 
 import (
-	"log"
 	"os"
 	"strings"
+	"time"
+
+	"github.com/sirupsen/logrus"
 )
 
 type Logger struct {
-	level    LogLevel
-	infoLog  *log.Logger
-	errorLog *log.Logger
-	debugLog *log.Logger
+	*logrus.Logger
 }
 
-type LogLevel int
-
-const (
-	DEBUG LogLevel = iota
-	INFO
-	ERROR
-)
-
 func NewLogger(level string) *Logger {
-	logLevel := INFO
-	switch strings.ToLower(level) {
-	case "debug":
-		logLevel = DEBUG
-	case "info":
-		logLevel = INFO
-	case "error":
-		logLevel = ERROR
+	logger := logrus.New()
+	
+	logLevel, err := logrus.ParseLevel(strings.ToLower(level))
+	if err != nil {
+		logLevel = logrus.InfoLevel
 	}
+	
+	logger.SetLevel(logLevel)
+	logger.SetFormatter(&logrus.JSONFormatter{
+		TimestampFormat: time.RFC3339,
+		FieldMap: logrus.FieldMap{
+			logrus.FieldKeyTime:  "timestamp",
+			logrus.FieldKeyLevel: "level",
+			logrus.FieldKeyMsg:   "message",
+		},
+	})
+	
+	logger.SetOutput(os.Stdout)
+	
+	return &Logger{Logger: logger}
+}
 
-	return &Logger{
-		level:    logLevel,
-		infoLog:  log.New(os.Stdout, "INFO: ", log.Ldate|log.Ltime|log.Lshortfile),
-		errorLog: log.New(os.Stderr, "ERROR: ", log.Ldate|log.Ltime|log.Lshortfile),
-		debugLog: log.New(os.Stdout, "DEBUG: ", log.Ldate|log.Ltime|log.Lshortfile),
+func (l *Logger) LogCertificateEvent(event string, certID string, customerID int, details map[string]interface{}) {
+	fields := logrus.Fields{
+		"event":       event,
+		"cert_id":     certID,
+		"customer_id": customerID,
+		"type":        "certificate_audit",
 	}
+	
+	for k, v := range details {
+		fields[k] = v
+	}
+	
+	l.WithFields(fields).Info("Certificate lifecycle event")
+}
+
+func (l *Logger) LogSecurityEvent(event string, userID string, ip string, details map[string]interface{}) {
+	fields := logrus.Fields{
+		"event":   event,
+		"user_id": userID,
+		"ip":      ip,
+		"type":    "security_audit",
+	}
+	
+	for k, v := range details {
+		fields[k] = v
+	}
+	
+	l.WithFields(fields).Warn("Security event")
+}
+
+func (l *Logger) LogAPIAccess(method, path, ip string, statusCode int, duration time.Duration, userID string) {
+	l.WithFields(logrus.Fields{
+		"method":      method,
+		"path":        path,
+		"ip":          ip,
+		"status_code": statusCode,
+		"duration_ms": duration.Milliseconds(),
+		"user_id":     userID,
+		"type":        "api_access",
+	}).Info("API access")
+}
+
+func (l *Logger) LogError(err error, context string, fields map[string]interface{}) {
+	logFields := logrus.Fields{
+		"error":   err.Error(),
+		"context": context,
+		"type":    "error",
+	}
+	
+	for k, v := range fields {
+		logFields[k] = v
+	}
+	
+	l.WithFields(logFields).Error("Application error")
 }
 
 func (l *Logger) Info(args ...interface{}) {
-	if l.level <= INFO {
-		l.infoLog.Println(args...)
-	}
+	l.Logger.Info(args...)
 }
 
 func (l *Logger) Error(args ...interface{}) {
-	if l.level <= ERROR {
-		l.errorLog.Println(args...)
-	}
+	l.Logger.Error(args...)
 }
 
 func (l *Logger) Debug(args ...interface{}) {
-	if l.level <= DEBUG {
-		l.debugLog.Println(args...)
-	}
+	l.Logger.Debug(args...)
+}
+
+func (l *Logger) Warn(args ...interface{}) {
+	l.Logger.Warn(args...)
 }
 
 func (l *Logger) Fatal(args ...interface{}) {
-	l.errorLog.Fatal(args...)
+	l.Logger.Fatal(args...)
 }
 
 func (l *Logger) Infof(format string, args ...interface{}) {
-	if l.level <= INFO {
-		l.infoLog.Printf(format, args...)
-	}
+	l.Logger.Infof(format, args...)
 }
 
 func (l *Logger) Errorf(format string, args ...interface{}) {
-	if l.level <= ERROR {
-		l.errorLog.Printf(format, args...)
-	}
+	l.Logger.Errorf(format, args...)
 }
 
 func (l *Logger) Debugf(format string, args ...interface{}) {
-	if l.level <= DEBUG {
-		l.debugLog.Printf(format, args...)
-	}
+	l.Logger.Debugf(format, args...)
+}
+
+func (l *Logger) Warnf(format string, args ...interface{}) {
+	l.Logger.Warnf(format, args...)
+}
+
+func (l *Logger) Fatalf(format string, args ...interface{}) {
+	l.Logger.Fatalf(format, args...)
+}
+
+func (l *Logger) WithField(key string, value interface{}) *logrus.Entry {
+	return l.Logger.WithField(key, value)
+}
+
+func (l *Logger) WithFields(fields logrus.Fields) *logrus.Entry {
+	return l.Logger.WithFields(fields)
 }

@@ -1,0 +1,128 @@
+{{template "base.html" .}}
+
+{{define "content"}}
+<div class="page-header">
+    <h1 class="page-title">Certificate Issued Successfully!</h1>
+    <p>Your quantum-safe certificate has been generated and is ready for use.</p>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <h2 class="card-title">Certificate Details</h2>
+    </div>
+    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1rem;">
+        <div>
+            <strong>Common Name:</strong><br>
+            <code>{{.certificate.CommonName}}</code>
+        </div>
+        <div>
+            <strong>Serial Number:</strong><br>
+            <code style="font-size: 0.8rem;">{{.certificate.SerialNumber}}</code>
+        </div>
+        <div>
+            <strong>Valid From:</strong><br>
+            {{.certificate.NotBefore.Format "2006-01-02 15:04:05"}}
+        </div>
+        <div>
+            <strong>Valid Until:</strong><br>
+            {{.certificate.NotAfter.Format "2006-01-02 15:04:05"}}
+        </div>
+        <div>
+            <strong>Algorithms:</strong><br>
+            {{range .certificate.Algorithms}}
+                <span class="status-badge status-active" style="margin-right: 0.5rem;">{{.}}</span>
+            {{end}}
+        </div>
+        <div>
+            <strong>Status:</strong><br>
+            <span class="status-badge status-active">{{.certificate.Status}}</span>
+        </div>
+    </div>
+</div>
+
+{{if .certificate.SubjectAltNames}}
+<div class="card">
+    <div class="card-header">
+        <h2 class="card-title">Subject Alternative Names</h2>
+    </div>
+    <div>
+        {{range .certificate.SubjectAltNames}}
+            <span class="status-badge" style="background: #f3f4f6; color: #374151; margin-right: 0.5rem; margin-bottom: 0.5rem; display: inline-block;">{{.}}</span>
+        {{end}}
+    </div>
+</div>
+{{end}}
+
+<div class="card">
+    <div class="card-header">
+        <h2 class="card-title">Certificate (PEM Format)</h2>
+    </div>
+    <div style="position: relative;">
+        <textarea readonly style="width: 100%; height: 200px; font-family: monospace; font-size: 0.8rem; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 1rem;" id="certificatePEM">{{.certificate.CertificatePEM}}</textarea>
+        <button onclick="copyToClipboard(document.getElementById('certificatePEM').value)" class="btn btn-secondary" style="position: absolute; top: 10px; right: 10px;">Copy Certificate</button>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <h2 class="card-title">Private Key (PEM Format)</h2>
+    </div>
+    <div style="position: relative;">
+        <textarea readonly style="width: 100%; height: 200px; font-family: monospace; font-size: 0.8rem; background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: 1rem;" id="privateKeyPEM">{{.certificate.PrivateKeyPEM}}</textarea>
+        <button onclick="copyToClipboard(document.getElementById('privateKeyPEM').value)" class="btn btn-danger" style="position: absolute; top: 10px; right: 10px;">Copy Private Key</button>
+    </div>
+    <div style="margin-top: 1rem; padding: 1rem; background: #fef2f2; border-radius: 8px; border-left: 4px solid #ef4444;">
+        <strong>⚠️ Security Warning:</strong> Keep your private key secure and never share it. Store it in a safe location and use proper file permissions (600) when saving to disk.
+    </div>
+</div>
+
+{{if .isHybrid}}
+<div class="card">
+    <div class="card-header">
+        <h2 class="card-title">🚀 Quantum-Safe Features</h2>
+    </div>
+    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 1rem;">
+        <div>
+            <h4>🔐 Hybrid Cryptography</h4>
+            <p>This certificate uses both classical and post-quantum cryptographic algorithms for maximum security and compatibility.</p>
+        </div>
+        <div>
+            <h4>🛡️ Future-Proof</h4>
+            <p>Protected against both classical and quantum computing attacks, ensuring long-term security.</p>
+        </div>
+        <div>
+            <h4>🔄 Backward Compatible</h4>
+            <p>Works with existing TLS infrastructure while providing quantum resistance.</p>
+        </div>
+    </div>
+</div>
+{{end}}
+
+<div class="card">
+    <div class="card-header">
+        <h2 class="card-title">Next Steps</h2>
+    </div>
+    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 1rem;">
+        <div>
+            <h4>📥 Download</h4>
+            <p>Download your certificate and private key files for deployment.</p>
+            <a href="/api/v1/certificates/{{.certificate.ID}}/download?format=bundle" class="btn btn-primary" style="margin-top: 0.5rem;">Download Bundle</a>
+        </div>
+        <div>
+            <h4>🔧 Configure</h4>
+            <p>Install the certificate in your web server or application.</p>
+            <a href="#" class="btn btn-secondary" style="margin-top: 0.5rem;">Installation Guide</a>
+        </div>
+        <div>
+            <h4>📊 Monitor</h4>
+            <p>Track your certificate status and expiration dates.</p>
+            <a href="/certificates" class="btn btn-secondary" style="margin-top: 0.5rem;">View All Certificates</a>
+        </div>
+    </div>
+</div>
+
+<div style="text-align: center; margin: 2rem 0;">
+    <a href="/issue-cert" class="btn btn-primary">Issue Another Certificate</a>
+    <a href="/dashboard" class="btn btn-secondary">Back to Dashboard</a>
+</div>
+{{end}}

@@ -2,77 +2,50 @@ package ca
 
 import (
 	"fmt"
-	"io"
-	"net/http"
-	"net"
-	"strings"
-	"time"
+	"quantumca-platform/internal/crypto/pq"
+	"quantumca-platform/internal/utils"
 )
 
-type DomainValidator struct {
-	httpClient *http.Client
+type CertificateValidator struct {
+	config           *utils.Config
+	logger           *utils.Logger
+	allowedAlgorithms map[string]bool
 }
 
-func NewDomainValidator() *DomainValidator {
-	return &DomainValidator{
-		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
-		},
+func NewCertificateValidator(config *utils.Config, logger *utils.Logger) *CertificateValidator {
+	allowedAlgs := map[string]bool{
+		"dilithium2":            true,
+		"dilithium3":            true,
+		"dilithium5":            true,
+		"falcon512":             true,
+		"falcon1024":            true,
+		"sphincs-sha256-128f":   true,
+		"sphincs-sha256-128s":   true,
+		"sphincs-sha256-192f":   true,
+		"sphincs-sha256-256f":   true,
+		"kyber512":              true,
+		"kyber768":              true,
+		"kyber1024":             true,
+	}
+
+	return &CertificateValidator{
+		config:           config,
+		logger:           logger,
+		allowedAlgorithms: allowedAlgs,
 	}
 }
 
-func (v *DomainValidator) ValidateDomain(domain, token string) (bool, error) {
-	if err := v.validateDNS(domain, token); err == nil {
-		return true, nil
-	}
-
-	if err := v.validateHTTP(domain, token); err == nil {
-		return true, nil
-	}
-
-	return false, fmt.Errorf("domain validation failed for %s", domain)
+func (cv *CertificateValidator) IsAlgorithmAllowed(algorithm string) bool {
+	return cv.allowedAlgorithms[algorithm]
 }
 
-func (v *DomainValidator) validateDNS(domain, token string) error {
-	txtRecords, err := net.LookupTXT("_acme-challenge." + domain)
-	if err != nil {
-		return fmt.Errorf("DNS TXT lookup failed: %v", err)
-	}
-
-	for _, record := range txtRecords {
-		if strings.TrimSpace(record) == token {
-			return nil
-		}
-	}
-
-	return fmt.Errorf("DNS validation token not found")
+func (cv *CertificateValidator) ValidateKeyPair(privateKey, publicKey interface{}) error {
+	return pq.ValidateKeyPair(privateKey, publicKey)
 }
 
-func (v *DomainValidator) validateHTTP(domain, token string) error {
-	url := fmt.Sprintf("http://%s/.well-known/acme-challenge/%s", domain, token)
-	
-	resp, err := v.httpClient.Get(url)
-	if err != nil {
-		return fmt.Errorf("HTTP validation request failed: %v", err)
+func (cv *CertificateValidator) ValidateAlgorithmSupported(algorithm string) error {
+	if !cv.IsAlgorithmAllowed(algorithm) {
+		return fmt.Errorf("algorithm %s is not supported", algorithm)
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("HTTP validation returned status %d", resp.StatusCode)
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read HTTP validation response: %v", err)
-	}
-
-	if strings.TrimSpace(string(body)) != token {
-		return fmt.Errorf("HTTP validation token mismatch")
-	}
-
 	return nil
-}
-
-func (v *DomainValidator) GenerateValidationToken() string {
-	return fmt.Sprintf("%d", time.Now().UnixNano())
 }
