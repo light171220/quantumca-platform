@@ -81,7 +81,13 @@ func CreateCustomer(db *sql.DB, customer *Customer) (int, error) {
 		return 0, fmt.Errorf("invalid customer data: %w", err)
 	}
 
-	result, err := db.ExecContext(ctx, createCustomerQuery, 
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	result, err := tx.ExecContext(ctx, createCustomerQuery, 
 		sanitizeString(customer.CompanyName), 
 		sanitizeString(customer.Email), 
 		customer.APIKey, 
@@ -94,6 +100,10 @@ func CreateCustomer(db *sql.DB, customer *Customer) (int, error) {
 	id, err := result.LastInsertId()
 	if err != nil {
 		return 0, fmt.Errorf("failed to get customer ID: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
 	customer.ID = int(id)
@@ -107,7 +117,13 @@ func CreateCustomerWithContext(ctx context.Context, db *sql.DB, customer *Custom
 		return 0, fmt.Errorf("invalid customer data: %w", err)
 	}
 
-	result, err := db.ExecContext(ctx, createCustomerQuery, 
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	result, err := tx.ExecContext(ctx, createCustomerQuery, 
 		sanitizeString(customer.CompanyName), 
 		sanitizeString(customer.Email), 
 		customer.APIKey, 
@@ -120,6 +136,10 @@ func CreateCustomerWithContext(ctx context.Context, db *sql.DB, customer *Custom
 	id, err := result.LastInsertId()
 	if err != nil {
 		return 0, fmt.Errorf("failed to get customer ID: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
 	customer.ID = int(id)
@@ -216,7 +236,13 @@ func UpdateCustomer(db *sql.DB, customer *Customer) error {
 		return fmt.Errorf("invalid customer data: %w", err)
 	}
 
-	result, err := db.ExecContext(ctx, updateCustomerQuery, 
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	result, err := tx.ExecContext(ctx, updateCustomerQuery, 
 		sanitizeString(customer.CompanyName), 
 		sanitizeString(customer.Email), 
 		customer.Tier, 
@@ -235,7 +261,7 @@ func UpdateCustomer(db *sql.DB, customer *Customer) error {
 		return fmt.Errorf("customer not found or already deleted")
 	}
 
-	return nil
+	return tx.Commit()
 }
 
 func UpdateCustomerWithContext(ctx context.Context, db *sql.DB, customer *Customer) error {
@@ -243,7 +269,13 @@ func UpdateCustomerWithContext(ctx context.Context, db *sql.DB, customer *Custom
 		return fmt.Errorf("invalid customer data: %w", err)
 	}
 
-	result, err := db.ExecContext(ctx, updateCustomerQuery, 
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	result, err := tx.ExecContext(ctx, updateCustomerQuery, 
 		sanitizeString(customer.CompanyName), 
 		sanitizeString(customer.Email), 
 		customer.Tier, 
@@ -262,7 +294,154 @@ func UpdateCustomerWithContext(ctx context.Context, db *sql.DB, customer *Custom
 		return fmt.Errorf("customer not found or already deleted")
 	}
 
-	return nil
+	return tx.Commit()
+}
+
+func CreateCertificateAtomic(db *sql.DB, cert *Certificate, customerID int) (int, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	if err := validateCertificateInput(cert); err != nil {
+		return 0, fmt.Errorf("invalid certificate data: %w", err)
+	}
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	var count int
+	countQuery := `SELECT COUNT(*) FROM certificates WHERE customer_id = ? AND status = 'active' FOR UPDATE`
+	err = tx.QueryRowContext(ctx, countQuery, customerID).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("failed to check certificate quota: %w", err)
+	}
+
+	if count >= 1000 {
+		return 0, fmt.Errorf("certificate quota exceeded")
+	}
+
+	subjectAltNamesJSON, err := json.Marshal(cert.SubjectAltNames)
+	if err != nil {
+		return 0, fmt.Errorf("failed to marshal subject alt names: %w", err)
+	}
+
+	algorithmsJSON, err := json.Marshal(cert.Algorithms)
+	if err != nil {
+		return 0, fmt.Errorf("failed to marshal algorithms: %w", err)
+	}
+	
+	result, err := tx.ExecContext(ctx, createCertificateQuery, 
+		cert.CustomerID, 
+		sanitizeString(cert.SerialNumber), 
+		sanitizeString(cert.CommonName), 
+		string(subjectAltNamesJSON), 
+		cert.CertificatePEM, 
+		cert.PrivateKeyPEM, 
+		string(algorithmsJSON), 
+		cert.NotBefore, 
+		cert.NotAfter, 
+		cert.Status)
+	if err != nil {
+		return 0, fmt.Errorf("failed to create certificate: %w", err)
+	}
+
+	id, err := result.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("failed to get certificate ID: %w", err)
+	}
+
+	if err = tx.Commit(); err != nil {
+		return 0, fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	cert.ID = int(id)
+	cert.CreatedAt = time.Now()
+
+	return int(id), nil
+}
+
+func GetCertificatesPaginated(ctx context.Context, db *sql.DB, customerID, offset, limit int, statusFilter, commonNameFilter string) ([]Certificate, int, error) {
+	if customerID <= 0 || offset < 0 || limit <= 0 || limit > 100 {
+		return nil, 0, fmt.Errorf("invalid pagination parameters")
+	}
+
+	var certificates []Certificate
+	var total int
+	var args []interface{}
+	
+	baseQuery := `FROM certificates WHERE customer_id = ?`
+	args = append(args, customerID)
+	
+	if statusFilter != "" && isValidCertificateStatus(statusFilter) {
+		baseQuery += ` AND status = ?`
+		args = append(args, statusFilter)
+	}
+	
+	if commonNameFilter != "" {
+		baseQuery += ` AND common_name LIKE ?`
+		args = append(args, "%"+sanitizeString(commonNameFilter)+"%")
+	}
+
+	countQuery := `SELECT COUNT(*) ` + baseQuery
+	err := db.QueryRowContext(ctx, countQuery, args...).Scan(&total)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to count certificates: %w", err)
+	}
+
+	selectQuery := `SELECT id, customer_id, serial_number, common_name, subject_alt_names, 
+					certificate_pem, private_key_pem, algorithms, not_before, not_after, status, 
+					created_at, updated_at, last_alert_sent, revoked_at, revocation_reason ` + 
+					baseQuery + ` ORDER BY created_at DESC LIMIT ? OFFSET ?`
+	
+	args = append(args, limit, offset)
+	
+	rows, err := db.QueryContext(ctx, selectQuery, args...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to query certificates: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var cert Certificate
+		var subjectAltNamesJSON, algorithmsJSON string
+		var revokedAt sql.NullTime
+		var revocationReason sql.NullString
+
+		err := rows.Scan(&cert.ID, &cert.CustomerID, &cert.SerialNumber, 
+			&cert.CommonName, &subjectAltNamesJSON, &cert.CertificatePEM, 
+			&cert.PrivateKeyPEM, &algorithmsJSON, &cert.NotBefore, &cert.NotAfter, 
+			&cert.Status, &cert.CreatedAt, &cert.UpdatedAt, &cert.LastAlertSent, 
+			&revokedAt, &revocationReason)
+		if err != nil {
+			continue
+		}
+
+		if err = json.Unmarshal([]byte(subjectAltNamesJSON), &cert.SubjectAltNames); err != nil {
+			cert.SubjectAltNames = []string{}
+		}
+
+		if err = json.Unmarshal([]byte(algorithmsJSON), &cert.Algorithms); err != nil {
+			cert.Algorithms = []string{}
+		}
+		
+		if revokedAt.Valid {
+			cert.RevokedAt = &revokedAt.Time
+		}
+		
+		if revocationReason.Valid {
+			cert.RevocationReason = revocationReason.String
+		}
+
+		certificates = append(certificates, cert)
+	}
+
+	if err = rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("row iteration error: %w", err)
+	}
+
+	return certificates, total, nil
 }
 
 func CreateDomain(db *sql.DB, domain *Domain) (int, error) {
@@ -273,7 +452,13 @@ func CreateDomain(db *sql.DB, domain *Domain) (int, error) {
 		return 0, fmt.Errorf("invalid domain data: %w", err)
 	}
 
-	result, err := db.ExecContext(ctx, createDomainQuery, 
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	result, err := tx.ExecContext(ctx, createDomainQuery, 
 		domain.CustomerID, 
 		sanitizeString(domain.DomainName), 
 		domain.ValidationToken)
@@ -284,6 +469,10 @@ func CreateDomain(db *sql.DB, domain *Domain) (int, error) {
 	id, err := result.LastInsertId()
 	if err != nil {
 		return 0, fmt.Errorf("failed to get domain ID: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
 	domain.ID = int(id)
@@ -297,7 +486,13 @@ func CreateDomainWithContext(ctx context.Context, db *sql.DB, domain *Domain) (i
 		return 0, fmt.Errorf("invalid domain data: %w", err)
 	}
 
-	result, err := db.ExecContext(ctx, createDomainQuery, 
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	result, err := tx.ExecContext(ctx, createDomainQuery, 
 		domain.CustomerID, 
 		sanitizeString(domain.DomainName), 
 		domain.ValidationToken)
@@ -308,6 +503,10 @@ func CreateDomainWithContext(ctx context.Context, db *sql.DB, domain *Domain) (i
 	id, err := result.LastInsertId()
 	if err != nil {
 		return 0, fmt.Errorf("failed to get domain ID: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
 	domain.ID = int(id)
@@ -427,7 +626,13 @@ func VerifyDomain(db *sql.DB, id int) error {
 		return fmt.Errorf("invalid domain ID")
 	}
 
-	result, err := db.ExecContext(ctx, verifyDomainQuery, id)
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	result, err := tx.ExecContext(ctx, verifyDomainQuery, id)
 	if err != nil {
 		return fmt.Errorf("failed to verify domain: %w", err)
 	}
@@ -441,61 +646,11 @@ func VerifyDomain(db *sql.DB, id int) error {
 		return fmt.Errorf("domain not found")
 	}
 
-	return nil
+	return tx.Commit()
 }
 
 func CreateCertificate(db *sql.DB, cert *Certificate) (int, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	if err := validateCertificateInput(cert); err != nil {
-		return 0, fmt.Errorf("invalid certificate data: %w", err)
-	}
-
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return 0, fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer tx.Rollback()
-
-	subjectAltNamesJSON, err := json.Marshal(cert.SubjectAltNames)
-	if err != nil {
-		return 0, fmt.Errorf("failed to marshal subject alt names: %w", err)
-	}
-
-	algorithmsJSON, err := json.Marshal(cert.Algorithms)
-	if err != nil {
-		return 0, fmt.Errorf("failed to marshal algorithms: %w", err)
-	}
-	
-	result, err := tx.ExecContext(ctx, createCertificateQuery, 
-		cert.CustomerID, 
-		sanitizeString(cert.SerialNumber), 
-		sanitizeString(cert.CommonName), 
-		string(subjectAltNamesJSON), 
-		cert.CertificatePEM, 
-		cert.PrivateKeyPEM, 
-		string(algorithmsJSON), 
-		cert.NotBefore, 
-		cert.NotAfter, 
-		cert.Status)
-	if err != nil {
-		return 0, fmt.Errorf("failed to create certificate: %w", err)
-	}
-
-	id, err := result.LastInsertId()
-	if err != nil {
-		return 0, fmt.Errorf("failed to get certificate ID: %w", err)
-	}
-
-	if err = tx.Commit(); err != nil {
-		return 0, fmt.Errorf("failed to commit transaction: %w", err)
-	}
-
-	cert.ID = int(id)
-	cert.CreatedAt = time.Now()
-
-	return int(id), nil
+	return CreateCertificateAtomic(db, cert, cert.CustomerID)
 }
 
 func CreateCertificateWithContext(ctx context.Context, db *sql.DB, cert *Certificate) (int, error) {
@@ -508,6 +663,17 @@ func CreateCertificateWithContext(ctx context.Context, db *sql.DB, cert *Certifi
 		return 0, fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer tx.Rollback()
+
+	var count int
+	countQuery := `SELECT COUNT(*) FROM certificates WHERE customer_id = ? AND status = 'active' FOR UPDATE`
+	err = tx.QueryRowContext(ctx, countQuery, cert.CustomerID).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("failed to check certificate quota: %w", err)
+	}
+
+	if count >= 1000 {
+		return 0, fmt.Errorf("certificate quota exceeded")
+	}
 
 	subjectAltNamesJSON, err := json.Marshal(cert.SubjectAltNames)
 	if err != nil {
@@ -795,7 +961,13 @@ func RevokeCertificate(db *sql.DB, id int) error {
 		return fmt.Errorf("invalid certificate ID")
 	}
 
-	result, err := db.ExecContext(ctx, revokeCertificateQuery, id)
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	result, err := tx.ExecContext(ctx, revokeCertificateQuery, id)
 	if err != nil {
 		return fmt.Errorf("failed to revoke certificate: %w", err)
 	}
@@ -809,7 +981,7 @@ func RevokeCertificate(db *sql.DB, id int) error {
 		return fmt.Errorf("certificate not found or already revoked")
 	}
 
-	return nil
+	return tx.Commit()
 }
 
 func RevokeCertificateWithContext(ctx context.Context, db *sql.DB, id int) error {
@@ -817,7 +989,13 @@ func RevokeCertificateWithContext(ctx context.Context, db *sql.DB, id int) error
 		return fmt.Errorf("invalid certificate ID")
 	}
 
-	result, err := db.ExecContext(ctx, revokeCertificateQuery, id)
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	result, err := tx.ExecContext(ctx, revokeCertificateQuery, id)
 	if err != nil {
 		return fmt.Errorf("failed to revoke certificate: %w", err)
 	}
@@ -831,7 +1009,7 @@ func RevokeCertificateWithContext(ctx context.Context, db *sql.DB, id int) error
 		return fmt.Errorf("certificate not found or already revoked")
 	}
 
-	return nil
+	return tx.Commit()
 }
 
 func CreateIntermediateCA(db *sql.DB, ca *IntermediateCA) (int, error) {
@@ -842,7 +1020,13 @@ func CreateIntermediateCA(db *sql.DB, ca *IntermediateCA) (int, error) {
 		return 0, fmt.Errorf("invalid intermediate CA data: %w", err)
 	}
 
-	result, err := db.ExecContext(ctx, createIntermediateCAQuery, 
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	result, err := tx.ExecContext(ctx, createIntermediateCAQuery, 
 		ca.CustomerID, 
 		sanitizeString(ca.CommonName), 
 		ca.CertificatePEM, 
@@ -857,6 +1041,10 @@ func CreateIntermediateCA(db *sql.DB, ca *IntermediateCA) (int, error) {
 	id, err := result.LastInsertId()
 	if err != nil {
 		return 0, fmt.Errorf("failed to get intermediate CA ID: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
 	ca.ID = int(id)
@@ -870,7 +1058,13 @@ func CreateIntermediateCAWithContext(ctx context.Context, db *sql.DB, ca *Interm
 		return 0, fmt.Errorf("invalid intermediate CA data: %w", err)
 	}
 
-	result, err := db.ExecContext(ctx, createIntermediateCAQuery, 
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	result, err := tx.ExecContext(ctx, createIntermediateCAQuery, 
 		ca.CustomerID, 
 		sanitizeString(ca.CommonName), 
 		ca.CertificatePEM, 
@@ -885,6 +1079,10 @@ func CreateIntermediateCAWithContext(ctx context.Context, db *sql.DB, ca *Interm
 	id, err := result.LastInsertId()
 	if err != nil {
 		return 0, fmt.Errorf("failed to get intermediate CA ID: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
 	ca.ID = int(id)
@@ -1206,4 +1404,14 @@ func sanitizeString(input string) string {
 	}
 	
 	return input
+}
+
+func isValidCertificateStatus(status string) bool {
+	validStatuses := []string{"active", "revoked", "expired"}
+	for _, validStatus := range validStatuses {
+		if status == validStatus {
+			return true
+		}
+	}
+	return false
 }

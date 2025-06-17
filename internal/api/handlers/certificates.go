@@ -23,6 +23,7 @@ type CertificateHandler struct {
 	issuer         *ca.Issuer
 	metricsService *services.MetricsService
 	validator      *ca.DomainValidator
+	domainService  *services.DomainService
 }
 
 func NewCertificateHandler(db *sql.DB, config *utils.Config, logger *utils.Logger, metricsService *services.MetricsService) *CertificateHandler {
@@ -33,6 +34,7 @@ func NewCertificateHandler(db *sql.DB, config *utils.Config, logger *utils.Logge
 		issuer:         ca.NewIssuer(config),
 		metricsService: metricsService,
 		validator:      ca.NewDomainValidator(),
+		domainService:  services.NewDomainService(db, logger),
 	}
 }
 
@@ -40,33 +42,10 @@ type IssueCertRequest struct {
 	CommonName      string   `json:"common_name" binding:"required,fqdn,max=255"`
 	SubjectAltNames []string `json:"subject_alt_names" binding:"omitempty,dive,fqdn,max=255"`
 	ValidityDays    int      `json:"validity_days" binding:"omitempty,min=1,max=825"`
-	TemplateID      int      `json:"template_id" binding:"omitempty,min=1"`
+	TemplateID      int      `json:"template_id" binding:"required,min=1"`
 	Algorithm       string   `json:"algorithm" binding:"omitempty,oneof=dilithium2 dilithium3 dilithium5 falcon512 falcon1024"`
 	KeyUsage        []string `json:"key_usage" binding:"omitempty"`
 	ExtKeyUsage     []string `json:"ext_key_usage" binding:"omitempty"`
-}
-
-type CertificateResponse struct {
-	ID              int      `json:"id"`
-	SerialNumber    string   `json:"serial_number"`
-	CommonName      string   `json:"common_name"`
-	SubjectAltNames []string `json:"subject_alt_names"`
-	Certificate     string   `json:"certificate,omitempty"`
-	PrivateKey      string   `json:"private_key,omitempty"`
-	Algorithms      []string `json:"algorithms"`
-	NotBefore       string   `json:"not_before"`
-	NotAfter        string   `json:"not_after"`
-	Status          string   `json:"status"`
-	CreatedAt       string   `json:"created_at"`
-	ExpiresIn       int      `json:"expires_in_days"`
-}
-
-type CertificateListResponse struct {
-	Certificates []CertificateResponse `json:"certificates"`
-	Total        int                   `json:"total"`
-	Page         int                   `json:"page"`
-	PageSize     int                   `json:"page_size"`
-	TotalPages   int                   `json:"total_pages"`
 }
 
 func (h *CertificateHandler) Issue(c *gin.Context) {
@@ -94,7 +73,17 @@ func (h *CertificateHandler) Issue(c *gin.Context) {
 		return
 	}
 
-	if err := h.validateCertificateRequest(&req); err != nil {
+	template, err := h.getAndValidateTemplate(ctx, req.TemplateID)
+	if err != nil {
+		h.logger.LogError(err, "Template validation failed", map[string]interface{}{
+			"template_id": req.TemplateID,
+			"customer_id": custID,
+		})
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if err := h.validateCertificateRequest(&req, template); err != nil {
 		h.logger.LogError(err, "Certificate request validation failed", map[string]interface{}{
 			"customer_id": custID,
 			"common_name": req.CommonName,
@@ -120,37 +109,25 @@ func (h *CertificateHandler) Issue(c *gin.Context) {
 		return
 	}
 
-	if err := h.validateDomainOwnership(ctx, custID, req.CommonName, req.SubjectAltNames); err != nil {
+	domains := []string{req.CommonName}
+	domains = append(domains, req.SubjectAltNames...)
+	if err := h.domainService.ValidateDomainsForCertificate(custID, domains); err != nil {
 		h.logger.LogError(err, "Domain validation failed", map[string]interface{}{
 			"customer_id": custID,
-			"common_name": req.CommonName,
-			"sans":        req.SubjectAltNames,
+			"domains":     domains,
 		})
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	if req.ValidityDays == 0 {
-		req.ValidityDays = h.config.CertificateValidityDays
-	}
-
-	if req.Algorithm == "" {
-		req.Algorithm = "dilithium2"
-	}
-
-	cert, err := h.issuer.IssueCertificate(&ca.CertificateRequest{
-		CommonName:      utils.SanitizeString(req.CommonName),
-		SubjectAltNames: h.sanitizeSubjectAltNames(req.SubjectAltNames),
-		ValidityDays:    req.ValidityDays,
-		Customer:        customer,
-		Algorithm:       req.Algorithm,
-		TemplateID:      req.TemplateID,
-	})
+	certRequest := h.buildCertificateRequest(&req, template, customer)
+	
+	cert, err := h.issuer.IssueCertificate(certRequest)
 	if err != nil {
 		h.logger.LogError(err, "Failed to issue certificate", map[string]interface{}{
 			"customer_id": custID,
 			"common_name": req.CommonName,
-			"algorithm":   req.Algorithm,
+			"template_id": req.TemplateID,
 		})
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to issue certificate"})
 		return
@@ -177,36 +154,163 @@ func (h *CertificateHandler) Issue(c *gin.Context) {
 		return
 	}
 
-	h.logger.LogCertificateEvent("certificate_issued", fmt.Sprintf("%d", certID), custID, map[string]interface{}{
-		"common_name":    req.CommonName,
-		"serial_number":  cert.SerialNumber,
-		"validity_days":  req.ValidityDays,
-		"algorithms":     cert.Algorithms,
-		"template_id":    req.TemplateID,
-	})
+	h.logCertificateEvent("certificate_issued", certID, custID, &req, cert)
 
 	if h.metricsService != nil {
 		h.metricsService.RecordCertificateIssued(customer.Tier)
 	}
 
-	expiresIn := int(time.Until(cert.NotAfter).Hours() / 24)
+	response := h.buildCertificateResponse(certID, &req, cert)
+	c.JSON(http.StatusCreated, response)
+}
 
-	response := &CertificateResponse{
-		ID:              certID,
-		SerialNumber:    cert.SerialNumber,
-		CommonName:      req.CommonName,
-		SubjectAltNames: req.SubjectAltNames,
-		Certificate:     cert.CertificatePEM,
-		PrivateKey:      cert.PrivateKeyPEM,
-		Algorithms:      cert.Algorithms,
-		NotBefore:       cert.NotBefore.Format(time.RFC3339),
-		NotAfter:        cert.NotAfter.Format(time.RFC3339),
-		Status:          "active",
-		CreatedAt:       time.Now().Format(time.RFC3339),
-		ExpiresIn:       expiresIn,
+func (h *CertificateHandler) getAndValidateTemplate(ctx context.Context, templateID int) (*storage.CertificateTemplate, error) {
+	query := `SELECT id, name, description, key_usages, ext_key_usages, validity_days, 
+			  max_validity_days, is_ca, path_length, policies, status 
+			  FROM certificate_templates WHERE id = ? AND status = 'active'`
+
+	var template storage.CertificateTemplate
+	var keyUsagesJSON, extKeyUsagesJSON, policiesJSON sql.NullString
+	var pathLength sql.NullInt64
+
+	err := h.db.QueryRowContext(ctx, query, templateID).Scan(
+		&template.ID, &template.Name, &template.Description,
+		&keyUsagesJSON, &extKeyUsagesJSON, &template.ValidityDays,
+		&template.MaxValidityDays, &template.IsCA, &pathLength,
+		&policiesJSON, &template.Status)
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("certificate template not found")
+		}
+		return nil, fmt.Errorf("failed to get template: %w", err)
 	}
 
-	c.JSON(http.StatusCreated, response)
+	if keyUsagesJSON.Valid {
+		if err := storage.UnmarshalJSON([]byte(keyUsagesJSON.String), &template.KeyUsages); err != nil {
+			template.KeyUsages = []string{}
+		}
+	}
+
+	if extKeyUsagesJSON.Valid {
+		if err := storage.UnmarshalJSON([]byte(extKeyUsagesJSON.String), &template.ExtKeyUsages); err != nil {
+			template.ExtKeyUsages = []string{}
+		}
+	}
+
+	if policiesJSON.Valid {
+		if err := storage.UnmarshalJSON([]byte(policiesJSON.String), &template.Policies); err != nil {
+			template.Policies = make(map[string]interface{})
+		}
+	}
+
+	if pathLength.Valid {
+		pathLengthInt := int(pathLength.Int64)
+		template.PathLength = &pathLengthInt
+	}
+
+	return &template, nil
+}
+
+func (h *CertificateHandler) buildCertificateRequest(req *IssueCertRequest, template *storage.CertificateTemplate, customer *storage.Customer) *ca.CertificateRequest {
+	validityDays := req.ValidityDays
+	if validityDays == 0 {
+		validityDays = template.ValidityDays
+	}
+	if validityDays > template.MaxValidityDays {
+		validityDays = template.MaxValidityDays
+	}
+
+	algorithm := req.Algorithm
+	if algorithm == "" {
+		algorithm = "dilithium2"
+	}
+
+	return &ca.CertificateRequest{
+		CommonName:      utils.SanitizeString(req.CommonName),
+		SubjectAltNames: h.sanitizeSubjectAltNames(req.SubjectAltNames),
+		ValidityDays:    validityDays,
+		Customer:        customer,
+		Algorithm:       algorithm,
+		TemplateID:      req.TemplateID,
+	}
+}
+
+func (h *CertificateHandler) validateCertificateRequest(req *IssueCertRequest, template *storage.CertificateTemplate) error {
+	if err := utils.ValidateCommonName(req.CommonName); err != nil {
+		return fmt.Errorf("invalid common name: %w", err)
+	}
+
+	if err := h.validator.ValidateSubjectAltNames(req.SubjectAltNames); err != nil {
+		return fmt.Errorf("invalid subject alternative names: %w", err)
+	}
+
+	if req.ValidityDays > 0 {
+		if req.ValidityDays > template.MaxValidityDays {
+			return fmt.Errorf("validity days exceeds template maximum (%d > %d)", req.ValidityDays, template.MaxValidityDays)
+		}
+		if err := utils.ValidateValidityDays(req.ValidityDays); err != nil {
+			return fmt.Errorf("invalid validity days: %w", err)
+		}
+	}
+
+	if req.Algorithm != "" {
+		validAlgorithms := []string{"dilithium2", "dilithium3", "dilithium5", "falcon512", "falcon1024"}
+		valid := false
+		for _, alg := range validAlgorithms {
+			if req.Algorithm == alg {
+				valid = true
+				break
+			}
+		}
+		if !valid {
+			return fmt.Errorf("unsupported algorithm: %s", req.Algorithm)
+		}
+	}
+
+	return nil
+}
+
+func (h *CertificateHandler) sanitizeSubjectAltNames(sans []string) []string {
+	var sanitized []string
+	seen := make(map[string]bool)
+	
+	for _, san := range sans {
+		clean := strings.TrimSpace(utils.SanitizeString(san))
+		if len(clean) > 0 && len(clean) <= 255 && !seen[clean] {
+			sanitized = append(sanitized, clean)
+			seen[clean] = true
+		}
+	}
+	return sanitized
+}
+
+func (h *CertificateHandler) checkCertificateQuota(ctx context.Context, customerID int) error {
+	query := `SELECT COUNT(*) FROM certificates WHERE customer_id = ? AND status = 'active'`
+	
+	var count int
+	err := h.db.QueryRowContext(ctx, query, customerID).Scan(&count)
+	if err != nil {
+		return fmt.Errorf("failed to check certificate quota: %w", err)
+	}
+
+	if count >= h.config.MaxCertificatesPerCustomer {
+		return fmt.Errorf("certificate quota exceeded (%d/%d)", count, h.config.MaxCertificatesPerCustomer)
+	}
+
+	return nil
+}
+
+func (h *CertificateHandler) logCertificateEvent(event string, certID int, custID int, req *IssueCertRequest, cert *ca.CertificateResponse) {
+	h.logger.LogCertificateEvent(event, fmt.Sprintf("%d", certID), custID, map[string]interface{}{
+		"common_name":    req.CommonName,
+		"serial_number":  cert.SerialNumber,
+		"validity_days":  req.ValidityDays,
+		"algorithms":     cert.Algorithms,
+		"template_id":    req.TemplateID,
+		"is_hybrid":      cert.IsHybrid,
+		"has_kem":        cert.HasKEM,
+	})
 }
 
 func (h *CertificateHandler) List(c *gin.Context) {
@@ -587,113 +691,6 @@ func (h *CertificateHandler) Renew(c *gin.Context) {
 	c.JSON(http.StatusCreated, response)
 }
 
-func (h *CertificateHandler) validateCertificateRequest(req *IssueCertRequest) error {
-	if err := utils.ValidateCommonName(req.CommonName); err != nil {
-		return fmt.Errorf("invalid common name: %w", err)
-	}
-
-	if err := h.validator.ValidateSubjectAltNames(req.SubjectAltNames); err != nil {
-		return fmt.Errorf("invalid subject alternative names: %w", err)
-	}
-
-	if req.ValidityDays > 0 {
-		if err := utils.ValidateValidityDays(req.ValidityDays); err != nil {
-			return fmt.Errorf("invalid validity days: %w", err)
-		}
-	}
-
-	if req.Algorithm != "" {
-		validAlgorithms := []string{"dilithium2", "dilithium3", "dilithium5", "falcon512", "falcon1024"}
-		valid := false
-		for _, alg := range validAlgorithms {
-			if req.Algorithm == alg {
-				valid = true
-				break
-			}
-		}
-		if !valid {
-			return fmt.Errorf("unsupported algorithm: %s", req.Algorithm)
-		}
-	}
-
-	return nil
-}
-
-func (h *CertificateHandler) sanitizeSubjectAltNames(sans []string) []string {
-	var sanitized []string
-	seen := make(map[string]bool)
-	
-	for _, san := range sans {
-		clean := strings.TrimSpace(utils.SanitizeString(san))
-		if len(clean) > 0 && len(clean) <= 255 && !seen[clean] {
-			sanitized = append(sanitized, clean)
-			seen[clean] = true
-		}
-	}
-	return sanitized
-}
-
-func (h *CertificateHandler) checkCertificateQuota(ctx context.Context, customerID int) error {
-	query := `SELECT COUNT(*) FROM certificates WHERE customer_id = ? AND status = 'active'`
-	
-	var count int
-	err := h.db.QueryRowContext(ctx, query, customerID).Scan(&count)
-	if err != nil {
-		return fmt.Errorf("failed to check certificate quota: %w", err)
-	}
-
-	if count >= h.config.MaxCertificatesPerCustomer {
-		return fmt.Errorf("certificate quota exceeded (%d/%d)", count, h.config.MaxCertificatesPerCustomer)
-	}
-
-	return nil
-}
-
-func (h *CertificateHandler) validateDomainOwnership(ctx context.Context, customerID int, commonName string, subjectAltNames []string) error {
-	domains, err := storage.GetCustomerDomainsWithContext(ctx, h.db, customerID)
-	if err != nil {
-		return fmt.Errorf("failed to get customer domains: %w", err)
-	}
-
-	verifiedDomains := make(map[string]bool)
-	for _, domain := range domains {
-		if domain.IsVerified {
-			verifiedDomains[domain.DomainName] = true
-		}
-	}
-
-	if !h.isDomainVerified(commonName, verifiedDomains) {
-		return fmt.Errorf("domain %s is not verified", commonName)
-	}
-
-	for _, san := range subjectAltNames {
-		if !h.isDomainVerified(san, verifiedDomains) {
-			return fmt.Errorf("domain %s is not verified", san)
-		}
-	}
-
-	return nil
-}
-
-func (h *CertificateHandler) isDomainVerified(domain string, verifiedDomains map[string]bool) bool {
-	if verifiedDomains[domain] {
-		return true
-	}
-
-	if strings.HasPrefix(domain, "*.") {
-		baseDomain := domain[2:]
-		return verifiedDomains[baseDomain]
-	}
-
-	parts := strings.Split(domain, ".")
-	if len(parts) >= 2 {
-		wildcardDomain := "*." + strings.Join(parts[1:], ".")
-		return verifiedDomains[wildcardDomain]
-	}
-
-	return false
-}
-
 func (h *CertificateHandler) getCertificatesPaginated(ctx context.Context, customerID, page, pageSize int, status, commonName string) ([]CertificateResponse, int, error) {
 	offset := (page - 1) * pageSize
 	
@@ -765,4 +762,46 @@ func (h *CertificateHandler) getCertificatesPaginated(ctx context.Context, custo
 	}
 
 	return certificates, total, nil
+}
+
+func (h *CertificateHandler) buildCertificateResponse(certID int, req *IssueCertRequest, cert *ca.CertificateResponse) *CertificateResponse {
+	expiresIn := int(time.Until(cert.NotAfter).Hours() / 24)
+
+	return &CertificateResponse{
+		ID:              certID,
+		SerialNumber:    cert.SerialNumber,
+		CommonName:      req.CommonName,
+		SubjectAltNames: req.SubjectAltNames,
+		Certificate:     cert.CertificatePEM,
+		PrivateKey:      cert.PrivateKeyPEM,
+		Algorithms:      cert.Algorithms,
+		NotBefore:       cert.NotBefore.Format(time.RFC3339),
+		NotAfter:        cert.NotAfter.Format(time.RFC3339),
+		Status:          "active",
+		CreatedAt:       time.Now().Format(time.RFC3339),
+		ExpiresIn:       expiresIn,
+	}
+}
+
+type CertificateResponse struct {
+	ID              int      `json:"id"`
+	SerialNumber    string   `json:"serial_number"`
+	CommonName      string   `json:"common_name"`
+	SubjectAltNames []string `json:"subject_alt_names"`
+	Certificate     string   `json:"certificate,omitempty"`
+	PrivateKey      string   `json:"private_key,omitempty"`
+	Algorithms      []string `json:"algorithms"`
+	NotBefore       string   `json:"not_before"`
+	NotAfter        string   `json:"not_after"`
+	Status          string   `json:"status"`
+	CreatedAt       string   `json:"created_at"`
+	ExpiresIn       int      `json:"expires_in_days"`
+}
+
+type CertificateListResponse struct {
+	Certificates []CertificateResponse `json:"certificates"`
+	Total        int                   `json:"total"`
+	Page         int                   `json:"page"`
+	PageSize     int                   `json:"page_size"`
+	TotalPages   int                   `json:"total_pages"`
 }

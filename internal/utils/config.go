@@ -60,6 +60,10 @@ type Config struct {
 	CacheTTL                    time.Duration
 	ComplianceMode              bool
 	FIPSMode                    bool
+	KeyEncryptionEnabled        bool
+	DomainValidationRequired    bool
+	CertificateChainValidation  bool
+	BackupEncryptionPassword    string
 }
 
 func LoadConfig() (*Config, error) {
@@ -109,6 +113,9 @@ func LoadConfig() (*Config, error) {
 		CacheTTL:                    getEnvDuration("CACHE_TTL", "1h"),
 		ComplianceMode:              getEnvBool("COMPLIANCE_MODE", false),
 		FIPSMode:                    getEnvBool("FIPS_MODE", false),
+		KeyEncryptionEnabled:        getEnvBool("KEY_ENCRYPTION_ENABLED", true),
+		DomainValidationRequired:    getEnvBool("DOMAIN_VALIDATION_REQUIRED", true),
+		CertificateChainValidation:  getEnvBool("CERTIFICATE_CHAIN_VALIDATION", true),
 	}
 
 	if err := config.loadSecrets(); err != nil {
@@ -160,6 +167,16 @@ func (c *Config) loadSecrets() error {
 		}
 	}
 	c.IntermediateCAPassphrase = intermediateCAPassphrase
+
+	backupPassword := getEnv("BACKUP_ENCRYPTION_PASSWORD", "")
+	if backupPassword == "" {
+		var err error
+		backupPassword, err = generateRandomSecret(32)
+		if err != nil {
+			return fmt.Errorf("failed to generate backup encryption password: %w", err)
+		}
+	}
+	c.BackupEncryptionPassword = backupPassword
 
 	return nil
 }
@@ -243,6 +260,18 @@ func (c *Config) validate() error {
 		return fmt.Errorf("invalid log level: %s", c.LogLevel)
 	}
 
+	if c.KeyEncryptionEnabled && (c.RootCAPassphrase == "" || c.IntermediateCAPassphrase == "") {
+		return fmt.Errorf("key encryption enabled but passphrases not configured")
+	}
+
+	if len(c.RootCAPassphrase) < 32 {
+		return fmt.Errorf("root CA passphrase must be at least 32 characters")
+	}
+
+	if len(c.IntermediateCAPassphrase) < 32 {
+		return fmt.Errorf("intermediate CA passphrase must be at least 32 characters")
+	}
+
 	return nil
 }
 
@@ -280,10 +309,10 @@ func (c *Config) IsProduction() bool {
 
 func (c *Config) GetDatabaseConfig() map[string]interface{} {
 	return map[string]interface{}{
-		"path":               c.DatabasePath,
-		"max_connections":    c.DatabaseMaxConnections,
+		"path":                 c.DatabasePath,
+		"max_connections":      c.DatabaseMaxConnections,
 		"max_idle_connections": c.DatabaseMaxIdleConnections,
-		"connection_max_life": c.DatabaseConnectionMaxLife,
+		"connection_max_life":  c.DatabaseConnectionMaxLife,
 	}
 }
 
@@ -300,6 +329,36 @@ func (c *Config) GetRateLimitConfig() map[string]interface{} {
 		"limit": c.APIRateLimit,
 		"burst": c.APIRateBurst,
 	}
+}
+
+func (c *Config) GetSecurityConfig() map[string]interface{} {
+	return map[string]interface{}{
+		"key_encryption_enabled":       c.KeyEncryptionEnabled,
+		"domain_validation_required":   c.DomainValidationRequired,
+		"certificate_chain_validation": c.CertificateChainValidation,
+		"compliance_mode":              c.ComplianceMode,
+		"fips_mode":                    c.FIPSMode,
+	}
+}
+
+func (c *Config) ValidateSecuritySettings() error {
+	if !c.KeyEncryptionEnabled {
+		return fmt.Errorf("key encryption must be enabled in production")
+	}
+
+	if !c.DomainValidationRequired {
+		return fmt.Errorf("domain validation must be enabled in production")
+	}
+
+	if !c.CertificateChainValidation {
+		return fmt.Errorf("certificate chain validation must be enabled in production")
+	}
+
+	if c.IsProduction() && !c.TLSEnabled {
+		return fmt.Errorf("TLS must be enabled in production")
+	}
+
+	return nil
 }
 
 func getEnv(key, defaultValue string) string {

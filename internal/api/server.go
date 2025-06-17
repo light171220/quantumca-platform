@@ -12,6 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"quantumca-platform/internal/api/handlers"
 	"quantumca-platform/internal/api/middleware"
+	"quantumca-platform/internal/ocsp"
 	"quantumca-platform/internal/services"
 	"quantumca-platform/internal/utils"
 	"quantumca-platform/web"
@@ -23,6 +24,7 @@ type Server struct {
 	logger            *utils.Logger
 	engine            *gin.Engine
 	httpServer        *http.Server
+	ocspServer        *ocsp.Server
 	lifecycleService  *services.LifecycleService
 	backupService     *services.BackupService
 	metricsService    *services.MetricsService
@@ -46,12 +48,14 @@ func NewServer(db *sql.DB, config *utils.Config, logger *utils.Logger) (*Server,
 	backupService := services.NewBackupService(config, logger)
 	metricsService := services.NewMetricsService(db, config, logger)
 	healthService := services.NewHealthService(db, config, logger)
+	ocspServer := ocsp.NewServer(db, config)
 	
 	server := &Server{
 		db:               db,
 		config:           config,
 		logger:           logger,
 		engine:           engine,
+		ocspServer:       ocspServer,
 		lifecycleService: lifecycleService,
 		backupService:    backupService,
 		metricsService:   metricsService,
@@ -248,6 +252,13 @@ func (s *Server) Start() error {
 	s.logger.Infof("Environment: %s", s.config.Environment)
 	s.logger.Infof("TLS Enabled: %v", s.config.TLSEnabled)
 	s.logger.Infof("Debug Mode: %v", gin.IsDebugging())
+
+	go func() {
+		s.logger.Infof("Starting OCSP server on port %d", s.config.OCSPPort)
+		if err := s.ocspServer.Start(); err != nil {
+			s.logger.LogError(err, "OCSP server failed to start", nil)
+		}
+	}()
 
 	go s.handleShutdown()
 
