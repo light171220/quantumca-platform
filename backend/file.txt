@@ -7,6 +7,7 @@ file.txt
 go.mod
 go.sum
 internal
+scripts
 
 ./cmd:
 api
@@ -34,6 +35,9 @@ database.db-shm
 database.db-wal
 keys
 logs
+quantumca.db
+quantumca.db-shm
+quantumca.db-wal
 
 ./data/backups:
 
@@ -78,6 +82,8 @@ domain_validator.go
 intermediate.go
 issuer.go
 pq_certificate.go
+pqc_extensions.go
+pqc_x509.go
 rootca.go
 templates.go
 validator.go
@@ -94,6 +100,7 @@ common.go
 dilithium.go
 falcon.go
 kyber.go
+multi_pqc.go
 sphincs.go
 
 ./internal/ocsp:
@@ -120,3 +127,6 @@ helpers.go
 logger.go
 security.go
 validation.go
+
+./scripts:
+docker-entrypoint.sh

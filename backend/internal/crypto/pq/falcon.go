@@ -3,48 +3,57 @@ package pq
 import (
 	"fmt"
 
-	"github.com/cloudflare/circl/sign"
-	"github.com/cloudflare/circl/sign/schemes"
+	"github.com/open-quantum-safe/liboqs-go/oqs"
 )
 
 type FalconPrivateKey struct {
 	Mode       string
-	PrivateKey sign.PrivateKey
+	PrivateKey []byte
 	publicKey  *FalconPublicKey
 }
 
 type FalconPublicKey struct {
 	Mode      string
-	PublicKey sign.PublicKey
+	PublicKey []byte
 }
 
 func GenerateFalconKey(mode string) (*FalconPrivateKey, error) {
-	var scheme sign.Scheme
+	var sigName string
 	
 	switch mode {
 	case "falcon512":
-		scheme = schemes.ByName("Falcon512")
+		sigName = "Falcon-512"
 	case "falcon1024":
-		scheme = schemes.ByName("Falcon1024")
+		sigName = "Falcon-1024"
 	default:
 		return nil, fmt.Errorf("unsupported Falcon mode: %s", mode)
 	}
 
-	if scheme == nil {
-		return nil, fmt.Errorf("failed to get Falcon scheme for mode: %s", mode)
+	if !oqs.IsSigEnabled(sigName) {
+		return nil, fmt.Errorf("Falcon algorithm %s is not enabled in liboqs", sigName)
 	}
 
-	pub, priv, err := scheme.GenerateKey()
+	sig := oqs.Signature{}
+	defer sig.Clean()
+
+	err := sig.Init(sigName, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to generate %s key: %w", mode, err)
+		return nil, fmt.Errorf("failed to initialize %s: %w", sigName, err)
 	}
+
+	publicKey, err := sig.GenerateKeyPair()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate %s key pair: %w", sigName, err)
+	}
+
+	privateKey := sig.ExportSecretKey()
 
 	return &FalconPrivateKey{
 		Mode:       mode,
-		PrivateKey: priv,
+		PrivateKey: privateKey,
 		publicKey: &FalconPublicKey{
 			Mode:      mode,
-			PublicKey: pub,
+			PublicKey: publicKey,
 		},
 	}, nil
 }
@@ -58,21 +67,11 @@ func (f *FalconPrivateKey) Public() interface{} {
 		return f.publicKey
 	}
 
-	if f.PrivateKey != nil {
-		pubKey := f.PrivateKey.Public()
-		if signPubKey, ok := pubKey.(sign.PublicKey); ok {
-			f.publicKey = &FalconPublicKey{
-				Mode:      f.Mode,
-				PublicKey: signPubKey,
-			}
-		}
-	}
-	
-	return f.publicKey
+	return nil
 }
 
 func (f *FalconPrivateKey) Sign(message []byte) ([]byte, error) {
-	if f == nil || f.PrivateKey == nil {
+	if f == nil || len(f.PrivateKey) == 0 {
 		return nil, fmt.Errorf("invalid private key")
 	}
 	
@@ -80,26 +79,34 @@ func (f *FalconPrivateKey) Sign(message []byte) ([]byte, error) {
 		return nil, fmt.Errorf("message cannot be empty")
 	}
 
-	var scheme sign.Scheme
+	var sigName string
 	switch f.Mode {
 	case "falcon512":
-		scheme = schemes.ByName("Falcon512")
+		sigName = "Falcon-512"
 	case "falcon1024":
-		scheme = schemes.ByName("Falcon1024")
+		sigName = "Falcon-1024"
 	default:
 		return nil, fmt.Errorf("unsupported Falcon mode: %s", f.Mode)
 	}
 
-	if scheme == nil {
-		return nil, fmt.Errorf("failed to get Falcon scheme for mode: %s", f.Mode)
+	sig := oqs.Signature{}
+	defer sig.Clean()
+
+	err := sig.Init(sigName, f.PrivateKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize %s for signing: %w", sigName, err)
 	}
 
-	signature := scheme.Sign(f.PrivateKey, message, &sign.SignatureOpts{})
+	signature, err := sig.Sign(message)
+	if err != nil {
+		return nil, fmt.Errorf("failed to sign message with %s: %w", sigName, err)
+	}
+
 	return signature, nil
 }
 
 func (f *FalconPublicKey) Verify(message, signature []byte) bool {
-	if f == nil || f.PublicKey == nil {
+	if f == nil || len(f.PublicKey) == 0 {
 		return false
 	}
 	
@@ -107,47 +114,50 @@ func (f *FalconPublicKey) Verify(message, signature []byte) bool {
 		return false
 	}
 
-	var scheme sign.Scheme
+	var sigName string
 	switch f.Mode {
 	case "falcon512":
-		scheme = schemes.ByName("Falcon512")
+		sigName = "Falcon-512"
 	case "falcon1024":
-		scheme = schemes.ByName("Falcon1024")
+		sigName = "Falcon-1024"
 	default:
 		return false
 	}
 
-	if scheme == nil {
+	sig := oqs.Signature{}
+	defer sig.Clean()
+
+	err := sig.Init(sigName, nil)
+	if err != nil {
 		return false
 	}
 
-	return scheme.Verify(f.PublicKey, message, signature, &sign.SignatureOpts{})
+	isValid, err := sig.Verify(message, signature, f.PublicKey)
+	if err != nil {
+		return false
+	}
+
+	return isValid
 }
 
 func (f *FalconPrivateKey) Bytes() ([]byte, error) {
-	if f == nil || f.PrivateKey == nil {
+	if f == nil || len(f.PrivateKey) == 0 {
 		return nil, fmt.Errorf("invalid private key")
 	}
 	
-	keyBytes, err := f.PrivateKey.MarshalBinary()
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal private key: %w", err)
-	}
-
-	return keyBytes, nil
+	result := make([]byte, len(f.PrivateKey))
+	copy(result, f.PrivateKey)
+	return result, nil
 }
 
 func (f *FalconPublicKey) Bytes() ([]byte, error) {
-	if f == nil || f.PublicKey == nil {
+	if f == nil || len(f.PublicKey) == 0 {
 		return nil, fmt.Errorf("invalid public key")
 	}
 	
-	keyBytes, err := f.PublicKey.MarshalBinary()
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal public key: %w", err)
-	}
-
-	return keyBytes, nil
+	result := make([]byte, len(f.PublicKey))
+	copy(result, f.PublicKey)
+	return result, nil
 }
 
 func parseFalconPrivateKey(mode string, keyData []byte) (*FalconPrivateKey, error) {
@@ -155,28 +165,18 @@ func parseFalconPrivateKey(mode string, keyData []byte) (*FalconPrivateKey, erro
 		return nil, fmt.Errorf("empty key data")
 	}
 	
-	var scheme sign.Scheme
 	switch mode {
-	case "falcon512":
-		scheme = schemes.ByName("Falcon512")
-	case "falcon1024":
-		scheme = schemes.ByName("Falcon1024")
+	case "falcon512", "falcon1024":
 	default:
 		return nil, fmt.Errorf("unsupported Falcon mode: %s", mode)
 	}
 
-	if scheme == nil {
-		return nil, fmt.Errorf("failed to get Falcon scheme for mode: %s", mode)
-	}
-
-	priv, err := scheme.UnmarshalBinaryPrivateKey(keyData)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse %s private key: %w", mode, err)
-	}
+	privateKey := make([]byte, len(keyData))
+	copy(privateKey, keyData)
 
 	return &FalconPrivateKey{
 		Mode:       mode,
-		PrivateKey: priv,
+		PrivateKey: privateKey,
 	}, nil
 }
 
@@ -185,27 +185,63 @@ func parseFalconPublicKey(mode string, keyData []byte) (*FalconPublicKey, error)
 		return nil, fmt.Errorf("empty key data")
 	}
 	
-	var scheme sign.Scheme
 	switch mode {
-	case "falcon512":
-		scheme = schemes.ByName("Falcon512")
-	case "falcon1024":
-		scheme = schemes.ByName("Falcon1024")
+	case "falcon512", "falcon1024":
 	default:
 		return nil, fmt.Errorf("unsupported Falcon mode: %s", mode)
 	}
 
-	if scheme == nil {
-		return nil, fmt.Errorf("failed to get Falcon scheme for mode: %s", mode)
-	}
-
-	pub, err := scheme.UnmarshalBinaryPublicKey(keyData)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse %s public key: %w", mode, err)
-	}
+	publicKey := make([]byte, len(keyData))
+	copy(publicKey, keyData)
 
 	return &FalconPublicKey{
 		Mode:      mode,
-		PublicKey: pub,
+		PublicKey: publicKey,
 	}, nil
+}
+
+func IsFalconAvailable() (bool, []string) {
+	available := []string{}
+	
+	if oqs.IsSigEnabled("Falcon-512") {
+		available = append(available, "Falcon-512")
+	}
+	
+	if oqs.IsSigEnabled("Falcon-1024") {
+		available = append(available, "Falcon-1024")
+	}
+	
+	return len(available) > 0, available
+}
+
+func GetFalconDetails(mode string) (map[string]interface{}, error) {
+	var sigName string
+	switch mode {
+	case "falcon512":
+		sigName = "Falcon-512"
+	case "falcon1024":
+		sigName = "Falcon-1024"
+	default:
+		return nil, fmt.Errorf("unsupported Falcon mode: %s", mode)
+	}
+
+	sig := oqs.Signature{}
+	defer sig.Clean()
+
+	err := sig.Init(sigName, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize %s: %w", sigName, err)
+	}
+
+	details := map[string]interface{}{
+		"name":               sig.Details().Name,
+		"version":            sig.Details().Version,
+		"claimed_nist_level": sig.Details().ClaimedNISTLevel,
+		"euf_cma":            sig.Details().IsEUFCMA,
+		"public_key_length":  sig.Details().LengthPublicKey,
+		"private_key_length": sig.Details().LengthSecretKey,
+		"signature_length":   sig.Details().MaxLengthSignature,
+	}
+
+	return details, nil
 }

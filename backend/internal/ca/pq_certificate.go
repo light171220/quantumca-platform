@@ -45,12 +45,6 @@ type PQExtension struct {
 	Value    []byte `json:"value"`
 }
 
-type PQCertificateChain struct {
-	EndEntity     SignedPQCertificate   `json:"end_entity"`
-	Intermediates []SignedPQCertificate `json:"intermediates"`
-	Root          SignedPQCertificate   `json:"root"`
-}
-
 type PQCertificateRequest struct {
 	Subject        pkix.Name          `json:"subject"`
 	PublicKey      []byte             `json:"public_key"`
@@ -179,56 +173,82 @@ func (ei *Issuer) verifyPQCertificate(signedCert *SignedPQCertificate, issuerPub
 	return nil
 }
 
-func (ei *Issuer) buildPQCertificateChain(endEntity *SignedPQCertificate) (*PQCertificateChain, error) {
-	chain := &PQCertificateChain{
-		EndEntity:     *endEntity,
-		Intermediates: []SignedPQCertificate{},
-	}
-
-	intermediateCert := ei.getIntermediatePQCertificate()
-	if intermediateCert != nil {
-		chain.Intermediates = append(chain.Intermediates, *intermediateCert)
-	}
-
-	rootCert := ei.getRootPQCertificate()
-	if rootCert != nil {
-		chain.Root = *rootCert
-	}
-
-	return chain, nil
-}
-
 func (ei *Issuer) getIntermediatePQCertificate() *SignedPQCertificate {
-	return nil
+	if ei.intermediateCA == nil {
+		return nil
+	}
+	
+	cert := ei.intermediateCA.GetCertificate()
+	if cert == nil {
+		return nil
+	}
+
+	serialNumber, _ := generateSerialNumber()
+	pqCert := &PQCertificate{
+		Version:      1,
+		SerialNumber: serialNumber,
+		Subject:      cert.Subject,
+		Issuer:       cert.Issuer,
+		NotBefore:    cert.NotBefore,
+		NotAfter:     cert.NotAfter,
+		Algorithm:    "dilithium3",
+		KeyUsage:     cert.KeyUsage,
+		ExtKeyUsage:  cert.ExtKeyUsage,
+		Extensions:   []PQExtension{},
+	}
+
+	pubKeyBytes, err := pq.MarshalPublicKey(cert.PublicKey)
+	if err == nil {
+		pqCert.PublicKey = pubKeyBytes
+	}
+
+	signedCert := &SignedPQCertificate{
+		Certificate:        *pqCert,
+		SignatureAlgorithm: "dilithium3",
+		Signature:          cert.Signature,
+		SigningTime:        time.Now(),
+	}
+
+	return signedCert
 }
 
 func (ei *Issuer) getRootPQCertificate() *SignedPQCertificate {
-	return nil
-}
-
-func (ei *Issuer) validatePQCertificateChain(chain *PQCertificateChain) error {
-	if len(chain.Intermediates) == 0 {
-		return fmt.Errorf("no intermediate certificates in chain")
+	if ei.rootCA == nil {
+		return nil
+	}
+	
+	cert := ei.rootCA.GetCertificate()
+	if cert == nil {
+		return nil
 	}
 
-	if err := ei.verifyPQCertificate(&chain.EndEntity, chain.Intermediates[0].Certificate.PublicKey); err != nil {
-		return fmt.Errorf("end entity certificate verification failed: %w", err)
+	serialNumber, _ := generateSerialNumber()
+	pqCert := &PQCertificate{
+		Version:      1,
+		SerialNumber: serialNumber,
+		Subject:      cert.Subject,
+		Issuer:       cert.Issuer,
+		NotBefore:    cert.NotBefore,
+		NotAfter:     cert.NotAfter,
+		Algorithm:    "dilithium5",
+		KeyUsage:     cert.KeyUsage,
+		ExtKeyUsage:  cert.ExtKeyUsage,
+		Extensions:   []PQExtension{},
 	}
 
-	for i, intermediate := range chain.Intermediates {
-		var issuerKey interface{}
-		if i < len(chain.Intermediates)-1 {
-			issuerKey = chain.Intermediates[i+1].Certificate.PublicKey
-		} else {
-			issuerKey = chain.Root.Certificate.PublicKey
-		}
-
-		if err := ei.verifyPQCertificate(&intermediate, issuerKey); err != nil {
-			return fmt.Errorf("intermediate certificate %d verification failed: %w", i, err)
-		}
+	pubKeyBytes, err := pq.MarshalPublicKey(cert.PublicKey)
+	if err == nil {
+		pqCert.PublicKey = pubKeyBytes
 	}
 
-	return nil
+	signedCert := &SignedPQCertificate{
+		Certificate:        *pqCert,
+		SignatureAlgorithm: "dilithium5",
+		Signature:          cert.Signature,
+		SigningTime:        time.Now(),
+	}
+
+	return signedCert
 }
 
 func (ei *Issuer) exportPQCertificateToPEM(signedCert *SignedPQCertificate) ([]byte, error) {
@@ -246,14 +266,14 @@ func (ei *Issuer) parsePQCertificateFromPEM(pemData []byte) (*SignedPQCertificat
 	endMarker := "-----END PQ CERTIFICATE-----"
 	
 	pemStr := string(pemData)
-	start := len(startMarker)
-	end := len(pemStr) - len(endMarker)
+	startIdx := len(startMarker)
+	endIdx := len(pemStr) - len(endMarker)
 	
-	if start >= end {
+	if startIdx >= endIdx {
 		return nil, fmt.Errorf("invalid PEM format")
 	}
 	
-	certData := pemStr[start:end]
+	certData := pemStr[startIdx:endIdx]
 	
 	var signedCert SignedPQCertificate
 	if err := json.Unmarshal([]byte(certData), &signedCert); err != nil {

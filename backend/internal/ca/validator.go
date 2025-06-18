@@ -7,8 +7,8 @@ import (
 )
 
 type CertificateValidator struct {
-	config           *utils.Config
-	logger           *utils.Logger
+	config            *utils.Config
+	logger            *utils.Logger
 	allowedAlgorithms map[string]bool
 }
 
@@ -17,8 +17,6 @@ func NewCertificateValidator(config *utils.Config, logger *utils.Logger) *Certif
 		"dilithium2":            true,
 		"dilithium3":            true,
 		"dilithium5":            true,
-		"falcon512":             true,
-		"falcon1024":            true,
 		"sphincs-sha256-128f":   true,
 		"sphincs-sha256-128s":   true,
 		"sphincs-sha256-192f":   true,
@@ -30,8 +28,8 @@ func NewCertificateValidator(config *utils.Config, logger *utils.Logger) *Certif
 	}
 
 	return &CertificateValidator{
-		config:           config,
-		logger:           logger,
+		config:            config,
+		logger:            logger,
 		allowedAlgorithms: allowedAlgs,
 	}
 }
@@ -49,13 +47,13 @@ func (cv *CertificateValidator) ValidateMultiPQCKeyPair(multiPQCPrivateKey *pq.M
 		return fmt.Errorf("multi-PQC private key cannot be nil")
 	}
 
-	multiPQCPublicKey, err := multiPQCPrivateKey.Public()
+	multiPQCPublicKey, err := multiPQCPrivateKey.GetPublicKey()
 	if err != nil {
 		return fmt.Errorf("failed to get multi-PQC public key: %w", err)
 	}
 
 	testMessage := []byte("multi-pqc-validation-test")
-	signature, err := multiPQCPrivateKey.Sign(testMessage)
+	signature, err := multiPQCPrivateKey.SignMessage(testMessage)
 	if err != nil {
 		return fmt.Errorf("failed to sign with multi-PQC key: %w", err)
 	}
@@ -104,9 +102,9 @@ func (cv *CertificateValidator) ValidateMultiPQCAlgorithms(algorithms []string) 
 	}
 
 	expectedAlgorithms := map[string]bool{
-		"dilithium3":           false,
-		"falcon1024":           false,
-		"sphincs-sha256-256f":  false,
+		"dilithium3":            false,
+		"sphincs-sha256-128s":   false,
+		"dilithium5":            false,
 	}
 
 	for _, algorithm := range algorithms {
@@ -129,8 +127,6 @@ func (cv *CertificateValidator) ValidateSignatureStrength(algorithm string) erro
 		"dilithium2":            128,
 		"dilithium3":            192,
 		"dilithium5":            256,
-		"falcon512":             128,
-		"falcon1024":            256,
 		"sphincs-sha256-128f":   128,
 		"sphincs-sha256-128s":   128,
 		"sphincs-sha256-192f":   192,
@@ -191,8 +187,6 @@ func (cv *CertificateValidator) ValidateKeySize(algorithm string, keySize int) e
 		"dilithium2":            {2560, 1312},
 		"dilithium3":            {4000, 1952},
 		"dilithium5":            {4864, 2592},
-		"falcon512":             {1281, 897},
-		"falcon1024":            {2305, 1793},
 		"sphincs-sha256-128f":   {64, 32},
 		"sphincs-sha256-128s":   {64, 32},
 		"sphincs-sha256-192f":   {96, 48},
@@ -226,7 +220,7 @@ func (cv *CertificateValidator) ValidateCertificatePolicy(algorithms []string, i
 	if isCA {
 		hasStrongSignature := false
 		for _, algorithm := range algorithms {
-			if algorithm == "multi-pqc" || algorithm == "dilithium5" || algorithm == "falcon1024" || algorithm == "sphincs-sha256-256f" {
+			if algorithm == "multi-pqc" || algorithm == "dilithium5" || algorithm == "sphincs-sha256-256f" {
 				hasStrongSignature = true
 				break
 			}

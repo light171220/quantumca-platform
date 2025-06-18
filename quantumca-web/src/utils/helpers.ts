@@ -1,4 +1,4 @@
-import { format, isAfter, isBefore, addDays } from 'date-fns';
+import { format, isAfter, isBefore, addDays, differenceInDays, differenceInHours, differenceInMinutes } from 'date-fns';
 
 export const formatDate = (date: string | Date, formatStr: string = 'MMM dd, yyyy'): string => {
   return format(new Date(date), formatStr);
@@ -9,7 +9,22 @@ export const formatDateTime = (date: string | Date): string => {
 };
 
 export const formatRelativeTime = (date: string | Date): string => {
-  return formatDistanceToNow(new Date(date), { addSuffix: true });
+  const now = new Date();
+  const targetDate = new Date(date);
+  
+  const daysDiff = differenceInDays(now, targetDate);
+  const hoursDiff = differenceInHours(now, targetDate);
+  const minutesDiff = differenceInMinutes(now, targetDate);
+  
+  if (daysDiff > 0) {
+    return `${daysDiff} day${daysDiff > 1 ? 's' : ''} ago`;
+  } else if (hoursDiff > 0) {
+    return `${hoursDiff} hour${hoursDiff > 1 ? 's' : ''} ago`;
+  } else if (minutesDiff > 0) {
+    return `${minutesDiff} minute${minutesDiff > 1 ? 's' : ''} ago`;
+  } else {
+    return 'just now';
+  }
 };
 
 export const isExpiringSoon = (expiryDate: string | Date, days: number = 30): boolean => {

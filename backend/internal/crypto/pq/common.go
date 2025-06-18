@@ -74,10 +74,18 @@ func GetPublicKey(privateKey interface{}) (interface{}, error) {
 	case *KyberPrivateKey:
 		return key.Public(), nil
 	case *MultiPQCPrivateKey:
-		return key.Public()
+		return key.GetPublicKey()
 	default:
 		return nil, fmt.Errorf("unsupported private key type: %T", privateKey)
 	}
+}
+
+func GetAlgorithmName(key interface{}) (string, error) {
+	algorithm := getAlgorithmFromKey(key)
+	if algorithm == "" {
+		return "", fmt.Errorf("unknown algorithm for key type %T", key)
+	}
+	return algorithm, nil
 }
 
 func MarshalPrivateKey(privateKey interface{}) ([]byte, error) {
@@ -155,9 +163,9 @@ func MarshalPrivateKeyEncrypted(privateKey interface{}, password string) ([]byte
 		return nil, fmt.Errorf("failed to generate salt: %w", err)
 	}
 
-	key := pbkdf2.Key([]byte(password), salt, pbkdf2Iterations, keySize, sha256.New)
+	derivedKey := pbkdf2.Key([]byte(password), salt, pbkdf2Iterations, keySize, sha256.New)
 
-	block, err := aes.NewCipher(key)
+	block, err := aes.NewCipher(derivedKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create cipher: %w", err)
 	}
@@ -303,9 +311,9 @@ func ParsePrivateKeyEncrypted(data []byte, password string) (interface{}, error)
 		iterations = pbkdf2Iterations
 	}
 
-	key := pbkdf2.Key([]byte(password), encKeyInfo.Salt, iterations, keySize, sha256.New)
+	derivedKey := pbkdf2.Key([]byte(password), encKeyInfo.Salt, iterations, keySize, sha256.New)
 
-	block, err := aes.NewCipher(key)
+	block, err := aes.NewCipher(derivedKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create cipher: %w", err)
 	}
@@ -321,7 +329,7 @@ func ParsePrivateKeyEncrypted(data []byte, password string) (interface{}, error)
 	}
 
 	defer SecureZero(plaintext)
-	defer SecureZero(key)
+	defer SecureZero(derivedKey)
 
 	return ParsePrivateKey(plaintext)
 }
@@ -412,15 +420,15 @@ func IsKEMAlgorithm(algorithm string) bool {
 
 func GetAlgorithmOID(algorithm string) (asn1.ObjectIdentifier, error) {
 	oids := map[string]asn1.ObjectIdentifier{
-		"dilithium2":            {1, 3, 6, 1, 4, 1, 2, 267, 7, 4, 4},
-		"dilithium3":            {1, 3, 6, 1, 4, 1, 2, 267, 7, 6, 5},
-		"dilithium5":            {1, 3, 6, 1, 4, 1, 2, 267, 7, 8, 7},
-		"falcon512":             {1, 3, 9999, 3, 1},
-		"falcon1024":            {1, 3, 9999, 3, 4},
-		"sphincs-sha256-128f":   {1, 3, 9999, 6, 4, 13},
-		"sphincs-sha256-128s":   {1, 3, 9999, 6, 4, 16},
-		"sphincs-sha256-192f":   {1, 3, 9999, 6, 5, 10},
-		"sphincs-sha256-256f":   {1, 3, 9999, 6, 6, 10},
+		"dilithium2":            {2, 16, 840, 1, 101, 3, 4, 3, 17},
+		"dilithium3":            {2, 16, 840, 1, 101, 3, 4, 3, 18},
+		"dilithium5":            {2, 16, 840, 1, 101, 3, 4, 3, 19},
+		"falcon512":             {1, 3, 6, 1, 4, 1, 2, 267, 8, 3, 3},
+		"falcon1024":            {1, 3, 6, 1, 4, 1, 2, 267, 8, 3, 4},
+		"sphincs-sha256-128f":   {1, 3, 6, 1, 4, 1, 2, 267, 12, 4, 1},
+		"sphincs-sha256-128s":   {1, 3, 6, 1, 4, 1, 2, 267, 12, 4, 2},
+		"sphincs-sha256-192f":   {1, 3, 6, 1, 4, 1, 2, 267, 12, 6, 1},
+		"sphincs-sha256-256f":   {1, 3, 6, 1, 4, 1, 2, 267, 12, 8, 1},
 		"kyber512":              {1, 3, 6, 1, 4, 1, 2, 267, 5, 3, 1},
 		"kyber768":              {1, 3, 6, 1, 4, 1, 2, 267, 5, 3, 2},
 		"kyber1024":             {1, 3, 6, 1, 4, 1, 2, 267, 5, 3, 3},
@@ -444,17 +452,15 @@ func Sign(privateKey interface{}, message []byte) ([]byte, error) {
 	
 	switch key := privateKey.(type) {
 	case *DilithiumPrivateKey:
-		return key.Sign(message)
-	case *FalconPrivateKey:
-		return key.Sign(message)
+		return key.SignMessage(message)
 	case *SPHINCSPrivateKey:
 		return key.Sign(message)
 	case *MultiPQCPrivateKey:
-		signature, err := key.Sign(message)
+		signature, err := key.SignMessage(message)
 		if err != nil {
 			return nil, err
 		}
-		return asn1.Marshal(signature)
+		return asn1.Marshal(*signature)
 	default:
 		return nil, fmt.Errorf("unsupported private key type for signing: %T", privateKey)
 	}
@@ -467,8 +473,6 @@ func Verify(publicKey interface{}, message, signature []byte) bool {
 	
 	switch key := publicKey.(type) {
 	case *DilithiumPublicKey:
-		return key.Verify(message, signature)
-	case *FalconPublicKey:
 		return key.Verify(message, signature)
 	case *SPHINCSPublicKey:
 		return key.Verify(message, signature)

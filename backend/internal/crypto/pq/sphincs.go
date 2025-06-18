@@ -3,52 +3,69 @@ package pq
 import (
 	"fmt"
 
-	"github.com/cloudflare/circl/sign"
-	"github.com/cloudflare/circl/sign/schemes"
+	"github.com/open-quantum-safe/liboqs-go/oqs"
 )
 
 type SPHINCSPrivateKey struct {
 	Mode       string
-	PrivateKey sign.PrivateKey
+	PrivateKey []byte
 	publicKey  *SPHINCSPublicKey
 }
 
 type SPHINCSPublicKey struct {
 	Mode      string
-	PublicKey sign.PublicKey
+	PublicKey []byte
 }
 
 func GenerateSPHINCSKey(mode string) (*SPHINCSPrivateKey, error) {
-	var scheme sign.Scheme
+	var sigName string
 	
 	switch mode {
 	case "sphincs-sha256-128f":
-		scheme = schemes.ByName("SPHINCS+-SHA256-128f-simple")
+		sigName = "SPHINCS+-SHA2-128f-simple"
 	case "sphincs-sha256-128s":
-		scheme = schemes.ByName("SPHINCS+-SHA256-128s-simple")
+		sigName = "SPHINCS+-SHA2-128s-simple"
 	case "sphincs-sha256-192f":
-		scheme = schemes.ByName("SPHINCS+-SHA256-192f-simple")
+		sigName = "SPHINCS+-SHA2-192f-simple"
 	case "sphincs-sha256-256f":
-		scheme = schemes.ByName("SPHINCS+-SHA256-256f-simple")
+		sigName = "SPHINCS+-SHA2-256f-simple"
+	case "sphincs-sha2-128f-simple":
+		sigName = "SPHINCS+-SHA2-128f-simple"
+	case "sphincs-sha2-128s-simple":
+		sigName = "SPHINCS+-SHA2-128s-simple"
+	case "sphincs-sha2-192f-simple":
+		sigName = "SPHINCS+-SHA2-192f-simple"
+	case "sphincs-sha2-256f-simple":
+		sigName = "SPHINCS+-SHA2-256f-simple"
 	default:
 		return nil, fmt.Errorf("unsupported SPHINCS+ mode: %s", mode)
 	}
 
-	if scheme == nil {
-		return nil, fmt.Errorf("failed to get SPHINCS+ scheme for mode: %s", mode)
+	if !oqs.IsSigEnabled(sigName) {
+		return nil, fmt.Errorf("SPHINCS+ algorithm %s is not enabled in liboqs", sigName)
 	}
 
-	pub, priv, err := scheme.GenerateKey()
+	sig := oqs.Signature{}
+	defer sig.Clean()
+
+	err := sig.Init(sigName, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to generate %s key: %w", mode, err)
+		return nil, fmt.Errorf("failed to initialize %s: %w", sigName, err)
 	}
+
+	publicKey, err := sig.GenerateKeyPair()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate %s key pair: %w", sigName, err)
+	}
+
+	privateKey := sig.ExportSecretKey()
 
 	return &SPHINCSPrivateKey{
 		Mode:       mode,
-		PrivateKey: priv,
+		PrivateKey: privateKey,
 		publicKey: &SPHINCSPublicKey{
 			Mode:      mode,
-			PublicKey: pub,
+			PublicKey: publicKey,
 		},
 	}, nil
 }
@@ -62,21 +79,11 @@ func (s *SPHINCSPrivateKey) Public() interface{} {
 		return s.publicKey
 	}
 
-	if s.PrivateKey != nil {
-		pubKey := s.PrivateKey.Public()
-		if signPubKey, ok := pubKey.(sign.PublicKey); ok {
-			s.publicKey = &SPHINCSPublicKey{
-				Mode:      s.Mode,
-				PublicKey: signPubKey,
-			}
-		}
-	}
-	
-	return s.publicKey
+	return nil
 }
 
 func (s *SPHINCSPrivateKey) Sign(message []byte) ([]byte, error) {
-	if s == nil || s.PrivateKey == nil {
+	if s == nil || len(s.PrivateKey) == 0 {
 		return nil, fmt.Errorf("invalid private key")
 	}
 	
@@ -84,30 +91,46 @@ func (s *SPHINCSPrivateKey) Sign(message []byte) ([]byte, error) {
 		return nil, fmt.Errorf("message cannot be empty")
 	}
 
-	var scheme sign.Scheme
+	var sigName string
 	switch s.Mode {
 	case "sphincs-sha256-128f":
-		scheme = schemes.ByName("SPHINCS+-SHA256-128f-simple")
+		sigName = "SPHINCS+-SHA2-128f-simple"
 	case "sphincs-sha256-128s":
-		scheme = schemes.ByName("SPHINCS+-SHA256-128s-simple")
+		sigName = "SPHINCS+-SHA2-128s-simple"
 	case "sphincs-sha256-192f":
-		scheme = schemes.ByName("SPHINCS+-SHA256-192f-simple")
+		sigName = "SPHINCS+-SHA2-192f-simple"
 	case "sphincs-sha256-256f":
-		scheme = schemes.ByName("SPHINCS+-SHA256-256f-simple")
+		sigName = "SPHINCS+-SHA2-256f-simple"
+	case "sphincs-sha2-128f-simple":
+		sigName = "SPHINCS+-SHA2-128f-simple"
+	case "sphincs-sha2-128s-simple":
+		sigName = "SPHINCS+-SHA2-128s-simple"
+	case "sphincs-sha2-192f-simple":
+		sigName = "SPHINCS+-SHA2-192f-simple"
+	case "sphincs-sha2-256f-simple":
+		sigName = "SPHINCS+-SHA2-256f-simple"
 	default:
 		return nil, fmt.Errorf("unsupported SPHINCS+ mode: %s", s.Mode)
 	}
 
-	if scheme == nil {
-		return nil, fmt.Errorf("failed to get SPHINCS+ scheme for mode: %s", s.Mode)
+	sig := oqs.Signature{}
+	defer sig.Clean()
+
+	err := sig.Init(sigName, s.PrivateKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize %s for signing: %w", sigName, err)
 	}
 
-	signature := scheme.Sign(s.PrivateKey, message, &sign.SignatureOpts{})
+	signature, err := sig.Sign(message)
+	if err != nil {
+		return nil, fmt.Errorf("failed to sign message with %s: %w", sigName, err)
+	}
+
 	return signature, nil
 }
 
 func (s *SPHINCSPublicKey) Verify(message, signature []byte) bool {
-	if s == nil || s.PublicKey == nil {
+	if s == nil || len(s.PublicKey) == 0 {
 		return false
 	}
 	
@@ -115,51 +138,62 @@ func (s *SPHINCSPublicKey) Verify(message, signature []byte) bool {
 		return false
 	}
 
-	var scheme sign.Scheme
+	var sigName string
 	switch s.Mode {
 	case "sphincs-sha256-128f":
-		scheme = schemes.ByName("SPHINCS+-SHA256-128f-simple")
+		sigName = "SPHINCS+-SHA2-128f-simple"
 	case "sphincs-sha256-128s":
-		scheme = schemes.ByName("SPHINCS+-SHA256-128s-simple")
+		sigName = "SPHINCS+-SHA2-128s-simple"
 	case "sphincs-sha256-192f":
-		scheme = schemes.ByName("SPHINCS+-SHA256-192f-simple")
+		sigName = "SPHINCS+-SHA2-192f-simple"
 	case "sphincs-sha256-256f":
-		scheme = schemes.ByName("SPHINCS+-SHA256-256f-simple")
+		sigName = "SPHINCS+-SHA2-256f-simple"
+	case "sphincs-sha2-128f-simple":
+		sigName = "SPHINCS+-SHA2-128f-simple"
+	case "sphincs-sha2-128s-simple":
+		sigName = "SPHINCS+-SHA2-128s-simple"
+	case "sphincs-sha2-192f-simple":
+		sigName = "SPHINCS+-SHA2-192f-simple"
+	case "sphincs-sha2-256f-simple":
+		sigName = "SPHINCS+-SHA2-256f-simple"
 	default:
 		return false
 	}
 
-	if scheme == nil {
+	sig := oqs.Signature{}
+	defer sig.Clean()
+
+	err := sig.Init(sigName, nil)
+	if err != nil {
 		return false
 	}
 
-	return scheme.Verify(s.PublicKey, message, signature, &sign.SignatureOpts{})
+	isValid, err := sig.Verify(message, signature, s.PublicKey)
+	if err != nil {
+		return false
+	}
+
+	return isValid
 }
 
 func (s *SPHINCSPrivateKey) Bytes() ([]byte, error) {
-	if s == nil || s.PrivateKey == nil {
+	if s == nil || len(s.PrivateKey) == 0 {
 		return nil, fmt.Errorf("invalid private key")
 	}
 	
-	keyBytes, err := s.PrivateKey.MarshalBinary()
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal private key: %w", err)
-	}
-
-	return keyBytes, nil
+	result := make([]byte, len(s.PrivateKey))
+	copy(result, s.PrivateKey)
+	return result, nil
 }
 
 func (s *SPHINCSPublicKey) Bytes() ([]byte, error) {
-	if s == nil || s.PublicKey == nil {
+	if s == nil || len(s.PublicKey) == 0 {
 		return nil, fmt.Errorf("invalid public key")
 	}
 	
-	keyBytes, err := s.PublicKey.MarshalBinary()
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal public key: %w", err)
-	}
-
-	return keyBytes, nil
+	result := make([]byte, len(s.PublicKey))
+	copy(result, s.PublicKey)
+	return result, nil
 }
 
 func parseSPHINCSPrivateKey(mode string, keyData []byte) (*SPHINCSPrivateKey, error) {
@@ -167,32 +201,19 @@ func parseSPHINCSPrivateKey(mode string, keyData []byte) (*SPHINCSPrivateKey, er
 		return nil, fmt.Errorf("empty key data")
 	}
 	
-	var scheme sign.Scheme
 	switch mode {
-	case "sphincs-sha256-128f":
-		scheme = schemes.ByName("SPHINCS+-SHA256-128f-simple")
-	case "sphincs-sha256-128s":
-		scheme = schemes.ByName("SPHINCS+-SHA256-128s-simple")
-	case "sphincs-sha256-192f":
-		scheme = schemes.ByName("SPHINCS+-SHA256-192f-simple")
-	case "sphincs-sha256-256f":
-		scheme = schemes.ByName("SPHINCS+-SHA256-256f-simple")
+	case "sphincs-sha256-128f", "sphincs-sha256-128s", "sphincs-sha256-192f", "sphincs-sha256-256f":
+	case "sphincs-sha2-128f-simple", "sphincs-sha2-128s-simple", "sphincs-sha2-192f-simple", "sphincs-sha2-256f-simple":
 	default:
 		return nil, fmt.Errorf("unsupported SPHINCS+ mode: %s", mode)
 	}
 
-	if scheme == nil {
-		return nil, fmt.Errorf("failed to get SPHINCS+ scheme for mode: %s", mode)
-	}
-
-	priv, err := scheme.UnmarshalBinaryPrivateKey(keyData)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse %s private key: %w", mode, err)
-	}
+	privateKey := make([]byte, len(keyData))
+	copy(privateKey, keyData)
 
 	return &SPHINCSPrivateKey{
 		Mode:       mode,
-		PrivateKey: priv,
+		PrivateKey: privateKey,
 	}, nil
 }
 
@@ -201,31 +222,37 @@ func parseSPHINCSPublicKey(mode string, keyData []byte) (*SPHINCSPublicKey, erro
 		return nil, fmt.Errorf("empty key data")
 	}
 	
-	var scheme sign.Scheme
 	switch mode {
-	case "sphincs-sha256-128f":
-		scheme = schemes.ByName("SPHINCS+-SHA256-128f-simple")
-	case "sphincs-sha256-128s":
-		scheme = schemes.ByName("SPHINCS+-SHA256-128s-simple")
-	case "sphincs-sha256-192f":
-		scheme = schemes.ByName("SPHINCS+-SHA256-192f-simple")
-	case "sphincs-sha256-256f":
-		scheme = schemes.ByName("SPHINCS+-SHA256-256f-simple")
+	case "sphincs-sha256-128f", "sphincs-sha256-128s", "sphincs-sha256-192f", "sphincs-sha256-256f":
+	case "sphincs-sha2-128f-simple", "sphincs-sha2-128s-simple", "sphincs-sha2-192f-simple", "sphincs-sha2-256f-simple":
 	default:
 		return nil, fmt.Errorf("unsupported SPHINCS+ mode: %s", mode)
 	}
 
-	if scheme == nil {
-		return nil, fmt.Errorf("failed to get SPHINCS+ scheme for mode: %s", mode)
-	}
-
-	pub, err := scheme.UnmarshalBinaryPublicKey(keyData)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse %s public key: %w", mode, err)
-	}
+	publicKey := make([]byte, len(keyData))
+	copy(publicKey, keyData)
 
 	return &SPHINCSPublicKey{
 		Mode:      mode,
-		PublicKey: pub,
+		PublicKey: publicKey,
 	}, nil
+}
+
+func IsSPHINCSAvailable() (bool, []string) {
+	available := []string{}
+	
+	sphincsAlgs := []string{
+		"SPHINCS+-SHA2-128f-simple",
+		"SPHINCS+-SHA2-128s-simple", 
+		"SPHINCS+-SHA2-192f-simple",
+		"SPHINCS+-SHA2-256f-simple",
+	}
+	
+	for _, alg := range sphincsAlgs {
+		if oqs.IsSigEnabled(alg) {
+			available = append(available, alg)
+		}
+	}
+	
+	return len(available) > 0, available
 }

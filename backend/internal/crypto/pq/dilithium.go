@@ -1,8 +1,10 @@
 package pq
 
 import (
+	"crypto"
 	"crypto/rand"
 	"fmt"
+	"io"
 
 	"github.com/cloudflare/circl/sign/dilithium/mode2"
 	"github.com/cloudflare/circl/sign/dilithium/mode3"
@@ -18,6 +20,45 @@ type DilithiumPrivateKey struct {
 type DilithiumPublicKey struct {
 	Mode      string
 	PublicKey interface{}
+}
+
+func (d *DilithiumPrivateKey) Public() crypto.PublicKey {
+	if d == nil {
+		return nil
+	}
+	
+	if d.publicKey != nil {
+		return d.publicKey
+	}
+
+	switch d.Mode {
+	case "dilithium2":
+		if priv, ok := d.PrivateKey.(*mode2.PrivateKey); ok {
+			d.publicKey = &DilithiumPublicKey{
+				Mode:      d.Mode,
+				PublicKey: priv.Public().(*mode2.PublicKey),
+			}
+		}
+	case "dilithium3":
+		if priv, ok := d.PrivateKey.(*mode3.PrivateKey); ok {
+			d.publicKey = &DilithiumPublicKey{
+				Mode:      d.Mode,
+				PublicKey: priv.Public().(*mode3.PublicKey),
+			}
+		}
+	case "dilithium5":
+		if priv, ok := d.PrivateKey.(*mode5.PrivateKey); ok {
+			d.publicKey = &DilithiumPublicKey{
+				Mode:      d.Mode,
+				PublicKey: priv.Public().(*mode5.PublicKey),
+			}
+		}
+	}
+	return d.publicKey
+}
+
+func (d *DilithiumPrivateKey) Sign(rand io.Reader, digest []byte, opts crypto.SignerOpts) (signature []byte, err error) {
+	return d.SignMessage(digest)
 }
 
 func GenerateDilithiumKey(mode string) (*DilithiumPrivateKey, error) {
@@ -66,42 +107,7 @@ func GenerateDilithiumKey(mode string) (*DilithiumPrivateKey, error) {
 	}
 }
 
-func (d *DilithiumPrivateKey) Public() interface{} {
-	if d == nil {
-		return nil
-	}
-	
-	if d.publicKey != nil {
-		return d.publicKey
-	}
-
-	switch d.Mode {
-	case "dilithium2":
-		if priv, ok := d.PrivateKey.(*mode2.PrivateKey); ok {
-			d.publicKey = &DilithiumPublicKey{
-				Mode:      d.Mode,
-				PublicKey: priv.Public().(*mode2.PublicKey),
-			}
-		}
-	case "dilithium3":
-		if priv, ok := d.PrivateKey.(*mode3.PrivateKey); ok {
-			d.publicKey = &DilithiumPublicKey{
-				Mode:      d.Mode,
-				PublicKey: priv.Public().(*mode3.PublicKey),
-			}
-		}
-	case "dilithium5":
-		if priv, ok := d.PrivateKey.(*mode5.PrivateKey); ok {
-			d.publicKey = &DilithiumPublicKey{
-				Mode:      d.Mode,
-				PublicKey: priv.Public().(*mode5.PublicKey),
-			}
-		}
-	}
-	return d.publicKey
-}
-
-func (d *DilithiumPrivateKey) Sign(message []byte) ([]byte, error) {
+func (d *DilithiumPrivateKey) SignMessage(message []byte) ([]byte, error) {
 	if d == nil || d.PrivateKey == nil {
 		return nil, fmt.Errorf("invalid private key")
 	}

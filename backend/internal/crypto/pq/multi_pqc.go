@@ -1,9 +1,11 @@
 package pq
 
 import (
+	"crypto"
 	"crypto/sha256"
 	"encoding/asn1"
 	"fmt"
+	"io"
 )
 
 type MultiPQCPrivateKey struct {
@@ -27,11 +29,11 @@ type MultiPQCPublicKey struct {
 }
 
 type MultiPQCSignature struct {
-	PrimarySignature   []byte
-	SecondarySignature []byte
-	TertiarySignature  []byte
-	Algorithms         []string
-	CombinedHash       []byte
+	PrimarySignature   []byte   `asn1:"tag:0"`
+	SecondarySignature []byte   `asn1:"tag:1"`
+	TertiarySignature  []byte   `asn1:"tag:2"`
+	Algorithms         []string `asn1:"tag:3"`
+	CombinedHash       []byte   `asn1:"tag:4"`
 }
 
 type MultiPQCKeyInfo struct {
@@ -40,10 +42,29 @@ type MultiPQCKeyInfo struct {
 	CombinedID []byte   `json:"combined_id"`
 }
 
+func (m *MultiPQCPrivateKey) Public() crypto.PublicKey {
+	multiPQCPublic, err := m.GetPublicKey()
+	if err != nil {
+		return nil
+	}
+	return multiPQCPublic
+}
+
+func (m *MultiPQCPrivateKey) Sign(rand io.Reader, digest []byte, opts crypto.SignerOpts) (signature []byte, err error) {
+	multiSig, err := m.SignMessage(digest)
+	if err != nil {
+		return nil, fmt.Errorf("multi-PQC signature failed: %w", err)
+	}
+	
+	return asn1.Marshal(*multiSig)
+}
+
 func GenerateMultiPQCKeyPair() (*MultiPQCPrivateKey, error) {
 	primaryAlg := "dilithium3"
-	secondaryAlg := "falcon1024"
-	tertiaryAlg := "sphincs-sha256-256f"
+	secondaryAlg := "sphincs-sha256-128s"
+	tertiaryAlg := "dilithium5"
+
+	fmt.Printf("Generating multi-PQC key with algorithms: %s, %s, %s\n", primaryAlg, secondaryAlg, tertiaryAlg)
 
 	primaryPriv, err := GenerateKey(primaryAlg)
 	if err != nil {
@@ -91,7 +112,7 @@ func GenerateMultiPQCKeyPair() (*MultiPQCPrivateKey, error) {
 	}, nil
 }
 
-func (m *MultiPQCPrivateKey) Public() (*MultiPQCPublicKey, error) {
+func (m *MultiPQCPrivateKey) GetPublicKey() (*MultiPQCPublicKey, error) {
 	primaryPub, err := GetPublicKey(m.PrimaryKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get primary public key: %w", err)
@@ -118,7 +139,7 @@ func (m *MultiPQCPrivateKey) Public() (*MultiPQCPublicKey, error) {
 	}, nil
 }
 
-func (m *MultiPQCPrivateKey) Sign(message []byte) (*MultiPQCSignature, error) {
+func (m *MultiPQCPrivateKey) SignMessage(message []byte) (*MultiPQCSignature, error) {
 	primarySig, err := Sign(m.PrimaryKey, message)
 	if err != nil {
 		return nil, fmt.Errorf("primary signature failed: %w", err)

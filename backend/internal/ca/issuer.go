@@ -289,14 +289,29 @@ func (ei *Issuer) validateCertificateChainComplete(cert *x509.Certificate) error
 }
 
 func (ei *Issuer) issuePQCertificate(req *CertificateRequest, algorithm string) (*CertificateResponse, error) {
-	privateKey, err := pq.GenerateKey(algorithm)
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate PQ key: %w", err)
-	}
+	var privateKey interface{}
+	var publicKey interface{}
+	var err error
 
-	publicKey, err := pq.GetPublicKey(privateKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get public key: %w", err)
+	if req.UseMultiPQC {
+		multiPQCKey, err := pq.GenerateMultiPQCKeyPair()
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate multi-PQC key: %w", err)
+		}
+		privateKey = multiPQCKey
+		publicKey, err = multiPQCKey.GetPublicKey()
+		if err != nil {
+			return nil, fmt.Errorf("failed to get multi-PQC public key: %w", err)
+		}
+	} else {
+		privateKey, err = pq.GenerateKey(algorithm)
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate PQ key: %w", err)
+		}
+		publicKey, err = pq.GetPublicKey(privateKey)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get public key: %w", err)
+		}
 	}
 
 	serialNumber, err := ei.generateSecureSerialNumber()
@@ -317,15 +332,28 @@ func (ei *Issuer) issuePQCertificate(req *CertificateRequest, algorithm string) 
 		Bytes: certDER,
 	})
 
-	privateKeyDER, err := pq.MarshalPrivateKey(privateKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal private key: %w", err)
-	}
+	var privateKeyDER []byte
+	var keyPEM []byte
 
-	keyPEM := pem.EncodeToMemory(&pem.Block{
-		Type:  "PRIVATE KEY",
-		Bytes: privateKeyDER,
-	})
+	if req.UseMultiPQC {
+		privateKeyDER, err = pq.MarshalMultiPQCPrivateKey(privateKey.(*pq.MultiPQCPrivateKey))
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal multi-PQC private key: %w", err)
+		}
+		keyPEM = pem.EncodeToMemory(&pem.Block{
+			Type:  "MULTI-PQC PRIVATE KEY",
+			Bytes: privateKeyDER,
+		})
+	} else {
+		privateKeyDER, err = pq.MarshalPrivateKey(privateKey)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal private key: %w", err)
+		}
+		keyPEM = pem.EncodeToMemory(&pem.Block{
+			Type:  "PRIVATE KEY",
+			Bytes: privateKeyDER,
+		})
+	}
 
 	fingerprint, err := calculateFingerprint(certDER)
 	if err != nil {
@@ -337,17 +365,35 @@ func (ei *Issuer) issuePQCertificate(req *CertificateRequest, algorithm string) 
 		return nil, fmt.Errorf("failed to calculate key ID: %w", err)
 	}
 
+	var algorithms []string
+	if req.UseMultiPQC {
+		multiKey := privateKey.(*pq.MultiPQCPrivateKey)
+		algorithms = []string{
+			"multi-pqc",
+			multiKey.PrimaryAlgorithm,
+			multiKey.SecondaryAlgorithm,
+			multiKey.TertiaryAlgorithm,
+		}
+	} else {
+		algorithms = []string{algorithm}
+	}
+
 	response := &CertificateResponse{
 		SerialNumber:   serialNumber.String(),
 		CertificatePEM: string(certPEM),
 		PrivateKeyPEM:  string(keyPEM),
-		Algorithms:     []string{algorithm},
+		Algorithms:     algorithms,
 		NotBefore:      template.NotBefore,
 		NotAfter:       template.NotAfter,
 		Fingerprint:    fingerprint,
 		KeyID:          keyID,
-		IsMultiPQC:     false,
+		IsMultiPQC:     req.UseMultiPQC,
 		HasKEM:         false,
+	}
+
+	if req.UseMultiPQC {
+		response.MultiPQCCertificates = []string{string(certPEM)}
+		response.MultiPQCPrivateKeys = []string{string(keyPEM)}
 	}
 
 	if req.KEMAlgorithm != "" && pq.IsKEMAlgorithm(req.KEMAlgorithm) {
@@ -376,142 +422,8 @@ func (ei *Issuer) issuePQCertificate(req *CertificateRequest, algorithm string) 
 }
 
 func (ei *Issuer) issueMultiPQCCertificate(req *CertificateRequest) (*CertificateResponse, error) {
-	multiPQCKey, err := pq.GenerateMultiPQCKeyPair()
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate multi-PQC key: %w", err)
-	}
-
-	multiPQCPublic, err := multiPQCKey.Public()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get multi-PQC public key: %w", err)
-	}
-
-	serialNumber, err := ei.generateSecureSerialNumber()
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate serial number: %w", err)
-	}
-
-	subject := ei.buildSubject(req)
-	template := ei.buildCertificateTemplate(req, subject, serialNumber)
-
-	primaryCert, err := ei.createPQCertificate(template, multiPQCPublic.PrimaryKey, multiPQCKey.PrimaryAlgorithm)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create primary certificate: %w", err)
-	}
-
-	secondaryCert, err := ei.createPQCertificate(template, multiPQCPublic.SecondaryKey, multiPQCKey.SecondaryAlgorithm)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create secondary certificate: %w", err)
-	}
-
-	tertiaryCert, err := ei.createPQCertificate(template, multiPQCPublic.TertiaryKey, multiPQCKey.TertiaryAlgorithm)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create tertiary certificate: %w", err)
-	}
-
-	multiPQCPrivateKeyDER, err := pq.MarshalMultiPQCPrivateKey(multiPQCKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal multi-PQC private key: %w", err)
-	}
-
-	multiPQCKeyPEM := pem.EncodeToMemory(&pem.Block{
-		Type:  "MULTI-PQC PRIVATE KEY",
-		Bytes: multiPQCPrivateKeyDER,
-	})
-
-	fingerprint, err := calculateFingerprint(primaryCert)
-	if err != nil {
-		return nil, fmt.Errorf("failed to calculate fingerprint: %w", err)
-	}
-
-	keyID := fmt.Sprintf("%x", multiPQCKey.CombinedKeyID[:8])
-
-	algorithms := []string{
-		"multi-pqc",
-		multiPQCKey.PrimaryAlgorithm,
-		multiPQCKey.SecondaryAlgorithm,
-		multiPQCKey.TertiaryAlgorithm,
-	}
-
-	response := &CertificateResponse{
-		SerialNumber:    serialNumber.String(),
-		CertificatePEM:  string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: primaryCert})),
-		PrivateKeyPEM:   string(multiPQCKeyPEM),
-		MultiPQCCertificates: []string{
-			string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: primaryCert})),
-			string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: secondaryCert})),
-			string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: tertiaryCert})),
-		},
-		MultiPQCPrivateKeys: []string{
-			string(multiPQCKeyPEM),
-		},
-		Algorithms:  algorithms,
-		NotBefore:   template.NotBefore,
-		NotAfter:    template.NotAfter,
-		Fingerprint: fingerprint,
-		KeyID:       keyID,
-		IsMultiPQC:  true,
-		HasKEM:      false,
-	}
-
-	if req.KEMAlgorithm != "" && pq.IsKEMAlgorithm(req.KEMAlgorithm) {
-		kemKeys, err := ei.generateKEMKeyPair(req.KEMAlgorithm)
-		if err != nil {
-			return nil, fmt.Errorf("failed to generate KEM keys: %w", err)
-		}
-
-		kemPublicPEM, err := ei.marshalKEMPublicKey(kemKeys.KEMPublic, req.KEMAlgorithm)
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal KEM public key: %w", err)
-		}
-
-		kemPrivatePEM, err := ei.marshalKEMPrivateKey(kemKeys.KEMPrivate, req.KEMAlgorithm)
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal KEM private key: %w", err)
-		}
-
-		response.KEMPublicKeyPEM = string(kemPublicPEM)
-		response.KEMPrivateKeyPEM = string(kemPrivatePEM)
-		response.HasKEM = true
-		response.Algorithms = append(response.Algorithms, req.KEMAlgorithm)
-	}
-
-	return response, nil
-}
-
-func (ei *Issuer) createPQCertificate(template *x509.Certificate, publicKey interface{}, algorithm string) ([]byte, error) {
-	pqPubKeyBytes, err := pq.MarshalPublicKey(publicKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal PQ public key: %w", err)
-	}
-
-	algorithmOID, err := pq.GetAlgorithmOID(algorithm)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get algorithm OID: %w", err)
-	}
-
-	publicKeyInfo := PQPublicKeyInfo{
-		Algorithm: algorithmOID,
-		PublicKey: asn1.BitString{
-			Bytes:     pqPubKeyBytes,
-			BitLength: len(pqPubKeyBytes) * 8,
-		},
-	}
-
-	publicKeyDER, err := asn1.Marshal(publicKeyInfo)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal public key info: %w", err)
-	}
-
-	template.PublicKey = publicKeyDER
-	template.PublicKeyAlgorithm = x509.UnknownPublicKeyAlgorithm
-
-	certDER, err := ei.intermediateCA.SignCertificate(template, publicKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to sign PQ certificate: %w", err)
-	}
-
-	return certDER, nil
+	req.UseMultiPQC = true
+	return ei.issuePQCertificate(req, "multi-pqc")
 }
 
 func (ei *Issuer) validateRequest(req *CertificateRequest) error {
@@ -579,10 +491,10 @@ func (ei *Issuer) validateIntermediateRequest(req *IntermediateCARequest) error 
 func (ei *Issuer) isValidAlgorithm(algorithm string) bool {
 	validAlgorithms := []string{
 		"dilithium2", "dilithium3", "dilithium5",
-		"falcon512", "falcon1024",
 		"sphincs-sha256-128f", "sphincs-sha256-128s",
 		"sphincs-sha256-192f", "sphincs-sha256-256f",
 		"kyber512", "kyber768", "kyber1024",
+		"multi-pqc",
 	}
 
 	for _, alg := range validAlgorithms {
@@ -814,7 +726,16 @@ func (ei *Issuer) marshalKEMPrivateKey(kemPrivate interface{}, algorithm string)
 }
 
 func (ei *Issuer) calculatePQKeyID(publicKey interface{}) (string, error) {
-	pubKeyBytes, err := pq.MarshalPublicKey(publicKey)
+	var pubKeyBytes []byte
+	var err error
+
+	switch key := publicKey.(type) {
+	case *pq.MultiPQCPublicKey:
+		pubKeyBytes, err = pq.MarshalMultiPQCPublicKey(key)
+	default:
+		pubKeyBytes, err = pq.MarshalPublicKey(publicKey)
+	}
+
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal public key: %w", err)
 	}
@@ -859,7 +780,7 @@ func (ei *Issuer) issueMultiPQCIntermediateCA(req *IntermediateCARequest) (*Cert
 		return nil, fmt.Errorf("failed to generate multi-PQC key: %w", err)
 	}
 
-	multiPQCPublic, err := multiPQCKey.Public()
+	multiPQCPublic, err := multiPQCKey.GetPublicKey()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get multi-PQC public key: %w", err)
 	}
@@ -898,20 +819,15 @@ func (ei *Issuer) issueMultiPQCIntermediateCA(req *IntermediateCARequest) (*Cert
 	ei.addStandardExtensions(template)
 	ei.addCAExtensions(template)
 
-	primaryCert, err := ei.createPQCertificate(template, multiPQCPublic.PrimaryKey, multiPQCKey.PrimaryAlgorithm)
+	certDER, err := ei.rootCA.SignCertificate(template, multiPQCPublic)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create primary certificate: %w", err)
+		return nil, fmt.Errorf("failed to sign intermediate CA certificate: %w", err)
 	}
 
-	secondaryCert, err := ei.createPQCertificate(template, multiPQCPublic.SecondaryKey, multiPQCKey.SecondaryAlgorithm)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create secondary certificate: %w", err)
-	}
-
-	tertiaryCert, err := ei.createPQCertificate(template, multiPQCPublic.TertiaryKey, multiPQCKey.TertiaryAlgorithm)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create tertiary certificate: %w", err)
-	}
+	certPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "CERTIFICATE",
+		Bytes: certDER,
+	})
 
 	multiPQCPrivateKeyDER, err := pq.MarshalMultiPQCPrivateKey(multiPQCKey)
 	if err != nil {
@@ -923,175 +839,173 @@ func (ei *Issuer) issueMultiPQCIntermediateCA(req *IntermediateCARequest) (*Cert
 		Bytes: multiPQCPrivateKeyDER,
 	})
 
-	fingerprint, err := calculateFingerprint(primaryCert)
-	if err != nil {
-		return nil, fmt.Errorf("failed to calculate fingerprint: %w", err)
-	}
-
-	keyID := fmt.Sprintf("%x", multiPQCKey.CombinedKeyID[:8])
-
-	algorithms := []string{
-		"multi-pqc",
-		multiPQCKey.PrimaryAlgorithm,
-		multiPQCKey.SecondaryAlgorithm,
-		multiPQCKey.TertiaryAlgorithm,
-	}
-
-	response := &CertificateResponse{
-		SerialNumber:    serialNumber.String(),
-		CertificatePEM:  string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: primaryCert})),
-		PrivateKeyPEM:   string(multiPQCKeyPEM),
-		MultiPQCCertificates: []string{
-			string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: primaryCert})),
-			string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: secondaryCert})),
-			string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: tertiaryCert})),
-		},
-		MultiPQCPrivateKeys: []string{
-			string(multiPQCKeyPEM),
-		},
-		Algorithms:  algorithms,
-		NotBefore:   template.NotBefore,
-		NotAfter:    template.NotAfter,
-		Fingerprint: fingerprint,
-		KeyID:       keyID,
-		IsMultiPQC:  true,
-		HasKEM:      false,
-	}
-
-	if req.KEMAlgorithm != "" && pq.IsKEMAlgorithm(req.KEMAlgorithm) {
-		kemKeys, err := ei.generateKEMKeyPair(req.KEMAlgorithm)
-		if err != nil {
-			return nil, fmt.Errorf("failed to generate KEM keys: %w", err)
-		}
-
-		kemPublicPEM, err := ei.marshalKEMPublicKey(kemKeys.KEMPublic, req.KEMAlgorithm)
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal KEM public key: %w", err)
-		}
-
-		kemPrivatePEM, err := ei.marshalKEMPrivateKey(kemKeys.KEMPrivate, req.KEMAlgorithm)
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal KEM private key: %w", err)
-		}
-
-		response.KEMPublicKeyPEM = string(kemPublicPEM)
-		response.KEMPrivateKeyPEM = string(kemPrivatePEM)
-		response.HasKEM = true
-		response.Algorithms = append(response.Algorithms, req.KEMAlgorithm)
-	}
-
-	return response, nil
-}
-
-func (ei *Issuer) issuePQIntermediateCA(req *IntermediateCARequest, algorithm string) (*CertificateResponse, error) {
-	privateKey, err := pq.GenerateKey(algorithm)
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate intermediate CA key: %w", err)
-	}
-
-	publicKey, err := pq.GetPublicKey(privateKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get public key: %w", err)
-	}
-
-	serialNumber, err := ei.generateSecureSerialNumber()
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate serial number: %w", err)
-	}
-
-	subject := pkix.Name{
-		CommonName:         req.CommonName,
-		Country:            []string{req.Country},
-		Province:           []string{req.State},
-		Locality:           []string{req.City},
-		Organization:       []string{req.Org},
-		OrganizationalUnit: []string{req.OrgUnit},
-	}
-
-	validityDays := req.ValidityDays
-	if validityDays == 0 {
-		validityDays = ei.config.IntermediateCAValidityDays
-	}
-
-	template := &x509.Certificate{
-		SerialNumber:          serialNumber,
-		Subject:               subject,
-		NotBefore:             time.Now(),
-		NotAfter:              time.Now().AddDate(0, 0, validityDays),
-		KeyUsage:              req.KeyUsage,
-		BasicConstraintsValid: true,
-		IsCA:                  true,
-		MaxPathLen:            req.MaxPathLen,
-		MaxPathLenZero:        req.MaxPathLen == 0,
-	}
-
-	ei.addStandardExtensions(template)
-	ei.addCAExtensions(template)
-
-	certDER, err := ei.rootCA.SignCertificate(template, publicKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to sign intermediate CA certificate: %w", err)
-	}
-
-	certPEM := pem.EncodeToMemory(&pem.Block{
-		Type:  "CERTIFICATE",
-		Bytes: certDER,
-	})
-
-	privateKeyDER, err := pq.MarshalPrivateKey(privateKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal private key: %w", err)
-	}
-
-	keyPEM := pem.EncodeToMemory(&pem.Block{
-		Type:  "PRIVATE KEY",
-		Bytes: privateKeyDER,
-	})
-
 	fingerprint, err := calculateFingerprint(certDER)
 	if err != nil {
 		return nil, fmt.Errorf("failed to calculate fingerprint: %w", err)
-	}
+   }
 
-	keyID, err := ei.calculatePQKeyID(publicKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to calculate key ID: %w", err)
-	}
+   keyID := fmt.Sprintf("%x", multiPQCKey.CombinedKeyID[:8])
 
-	response := &CertificateResponse{
-		SerialNumber:   serialNumber.String(),
-		CertificatePEM: string(certPEM),
-		PrivateKeyPEM:  string(keyPEM),
-		Algorithms:     []string{algorithm},
-		NotBefore:      template.NotBefore,
-		NotAfter:       template.NotAfter,
-		Fingerprint:    fingerprint,
-		KeyID:          keyID,
-		IsMultiPQC:     false,
-		HasKEM:         false,
-	}
+   algorithms := []string{
+   	"multi-pqc",
+   	multiPQCKey.PrimaryAlgorithm,
+   	multiPQCKey.SecondaryAlgorithm,
+   	multiPQCKey.TertiaryAlgorithm,
+   }
 
-	if req.KEMAlgorithm != "" && pq.IsKEMAlgorithm(req.KEMAlgorithm) {
-		kemKeys, err := ei.generateKEMKeyPair(req.KEMAlgorithm)
-		if err != nil {
-			return nil, fmt.Errorf("failed to generate KEM keys: %w", err)
-		}
+   response := &CertificateResponse{
+   	SerialNumber:    serialNumber.String(),
+   	CertificatePEM:  string(certPEM),
+   	PrivateKeyPEM:   string(multiPQCKeyPEM),
+   	MultiPQCCertificates: []string{
+   		string(certPEM),
+   	},
+   	MultiPQCPrivateKeys: []string{
+   		string(multiPQCKeyPEM),
+   	},
+   	Algorithms:  algorithms,
+   	NotBefore:   template.NotBefore,
+   	NotAfter:    template.NotAfter,
+   	Fingerprint: fingerprint,
+   	KeyID:       keyID,
+   	IsMultiPQC:  true,
+   	HasKEM:      false,
+   }
 
-		kemPublicPEM, err := ei.marshalKEMPublicKey(kemKeys.KEMPublic, req.KEMAlgorithm)
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal KEM public key: %w", err)
-		}
+   if req.KEMAlgorithm != "" && pq.IsKEMAlgorithm(req.KEMAlgorithm) {
+   	kemKeys, err := ei.generateKEMKeyPair(req.KEMAlgorithm)
+   	if err != nil {
+   		return nil, fmt.Errorf("failed to generate KEM keys: %w", err)
+   	}
 
-		kemPrivatePEM, err := ei.marshalKEMPrivateKey(kemKeys.KEMPrivate, req.KEMAlgorithm)
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal KEM private key: %w", err)
-		}
+   	kemPublicPEM, err := ei.marshalKEMPublicKey(kemKeys.KEMPublic, req.KEMAlgorithm)
+   	if err != nil {
+   		return nil, fmt.Errorf("failed to marshal KEM public key: %w", err)
+   	}
 
-		response.KEMPublicKeyPEM = string(kemPublicPEM)
-		response.KEMPrivateKeyPEM = string(kemPrivatePEM)
-		response.HasKEM = true
-		response.Algorithms = append(response.Algorithms, req.KEMAlgorithm)
-	}
+   	kemPrivatePEM, err := ei.marshalKEMPrivateKey(kemKeys.KEMPrivate, req.KEMAlgorithm)
+   	if err != nil {
+   		return nil, fmt.Errorf("failed to marshal KEM private key: %w", err)
+   	}
 
-	return response, nil
+   	response.KEMPublicKeyPEM = string(kemPublicPEM)
+   	response.KEMPrivateKeyPEM = string(kemPrivatePEM)
+   	response.HasKEM = true
+   	response.Algorithms = append(response.Algorithms, req.KEMAlgorithm)
+   }
+
+   return response, nil
+}
+
+func (ei *Issuer) issuePQIntermediateCA(req *IntermediateCARequest, algorithm string) (*CertificateResponse, error) {
+   privateKey, err := pq.GenerateKey(algorithm)
+   if err != nil {
+   	return nil, fmt.Errorf("failed to generate intermediate CA key: %w", err)
+   }
+
+   publicKey, err := pq.GetPublicKey(privateKey)
+   if err != nil {
+   	return nil, fmt.Errorf("failed to get public key: %w", err)
+   }
+
+   serialNumber, err := ei.generateSecureSerialNumber()
+   if err != nil {
+   	return nil, fmt.Errorf("failed to generate serial number: %w", err)
+   }
+
+   subject := pkix.Name{
+   	CommonName:         req.CommonName,
+   	Country:            []string{req.Country},
+   	Province:           []string{req.State},
+   	Locality:           []string{req.City},
+   	Organization:       []string{req.Org},
+   	OrganizationalUnit: []string{req.OrgUnit},
+   }
+
+   validityDays := req.ValidityDays
+   if validityDays == 0 {
+   	validityDays = ei.config.IntermediateCAValidityDays
+   }
+
+   template := &x509.Certificate{
+   	SerialNumber:          serialNumber,
+   	Subject:               subject,
+   	NotBefore:             time.Now(),
+   	NotAfter:              time.Now().AddDate(0, 0, validityDays),
+   	KeyUsage:              req.KeyUsage,
+   	BasicConstraintsValid: true,
+   	IsCA:                  true,
+   	MaxPathLen:            req.MaxPathLen,
+   	MaxPathLenZero:        req.MaxPathLen == 0,
+   }
+
+   ei.addStandardExtensions(template)
+   ei.addCAExtensions(template)
+
+   certDER, err := ei.rootCA.SignCertificate(template, publicKey)
+   if err != nil {
+   	return nil, fmt.Errorf("failed to sign intermediate CA certificate: %w", err)
+   }
+
+   certPEM := pem.EncodeToMemory(&pem.Block{
+   	Type:  "CERTIFICATE",
+   	Bytes: certDER,
+   })
+
+   privateKeyDER, err := pq.MarshalPrivateKey(privateKey)
+   if err != nil {
+   	return nil, fmt.Errorf("failed to marshal private key: %w", err)
+   }
+
+   keyPEM := pem.EncodeToMemory(&pem.Block{
+   	Type:  "PRIVATE KEY",
+   	Bytes: privateKeyDER,
+   })
+
+   fingerprint, err := calculateFingerprint(certDER)
+   if err != nil {
+   	return nil, fmt.Errorf("failed to calculate fingerprint: %w", err)
+   }
+
+   keyID, err := ei.calculatePQKeyID(publicKey)
+   if err != nil {
+   	return nil, fmt.Errorf("failed to calculate key ID: %w", err)
+   }
+
+   response := &CertificateResponse{
+   	SerialNumber:   serialNumber.String(),
+   	CertificatePEM: string(certPEM),
+   	PrivateKeyPEM:  string(keyPEM),
+   	Algorithms:     []string{algorithm},
+   	NotBefore:      template.NotBefore,
+   	NotAfter:       template.NotAfter,
+   	Fingerprint:    fingerprint,
+   	KeyID:          keyID,
+   	IsMultiPQC:     false,
+   	HasKEM:         false,
+   }
+
+   if req.KEMAlgorithm != "" && pq.IsKEMAlgorithm(req.KEMAlgorithm) {
+   	kemKeys, err := ei.generateKEMKeyPair(req.KEMAlgorithm)
+   	if err != nil {
+   		return nil, fmt.Errorf("failed to generate KEM keys: %w", err)
+   	}
+
+   	kemPublicPEM, err := ei.marshalKEMPublicKey(kemKeys.KEMPublic, req.KEMAlgorithm)
+   	if err != nil {
+   		return nil, fmt.Errorf("failed to marshal KEM public key: %w", err)
+   	}
+
+   	kemPrivatePEM, err := ei.marshalKEMPrivateKey(kemKeys.KEMPrivate, req.KEMAlgorithm)
+   	if err != nil {
+   		return nil, fmt.Errorf("failed to marshal KEM private key: %w", err)
+   	}
+
+   	response.KEMPublicKeyPEM = string(kemPublicPEM)
+   	response.KEMPrivateKeyPEM = string(kemPrivatePEM)
+   	response.HasKEM = true
+   	response.Algorithms = append(response.Algorithms, req.KEMAlgorithm)
+   }
+
+   return response, nil
 }
