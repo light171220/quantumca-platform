@@ -1,0 +1,50 @@
+version: '3.8'
+
+services:
+  quantumca:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+      - "8082:8081"
+      - "9090:9090"
+    volumes:
+      - ./data:/app/data
+      - ./configs:/app/configs
+      - quantumca_backups:/app/backups
+      - quantumca_logs:/app/logs
+    environment:
+      - ENVIRONMENT=development
+      - PORT=8080
+      - API_PORT=8080
+      - OCSP_PORT=8081
+      - METRICS_PORT=9090
+      - DATABASE_PATH=/app/data/database.db
+      - KEYS_PATH=/app/data/keys
+      - CERTIFICATES_PATH=/app/data/certificates
+      - BACKUP_PATH=/app/backups
+      - LOGS_PATH=/app/logs
+      - TLS_ENABLED=false
+      - LOG_LEVEL=info
+      - KEY_ENCRYPTION_ENABLED=true
+      - DOMAIN_VALIDATION_REQUIRED=true
+      - CERTIFICATE_CHAIN_VALIDATION=true
+      - API_RATE_LIMIT=100
+      - API_RATE_BURST=50
+      - BACKUP_ENABLED=true
+      - BACKUP_INTERVAL=24h
+      - BACKUP_RETENTION_DAYS=30
+      - METRICS_ENABLED=true
+      - CERTIFICATE_VALIDITY_DAYS=365
+      - INTERMEDIATE_CA_VALIDITY_DAYS=1825
+      - ROOT_CA_VALIDITY_DAYS=7300
+      - CERTIFICATE_RENEWAL_DAYS=30
+      - ALLOWED_ORIGINS=http://localhost:3000,https://localhost:3000,http://127.0.0.1:3000,https://127.0.0.1:3000
+    restart: unless-stopped
+
+volumes:
+  quantumca_backups:
+    driver: local
+  quantumca_logs:
+    driver: local
