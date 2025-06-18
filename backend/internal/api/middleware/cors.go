@@ -11,8 +11,8 @@ func CORSMiddleware() gin.HandlerFunc {
 		origin := c.GetHeader("Origin")
 		
 		allowedOrigins := []string{
-			"https://localhost:3000",
-			"https://127.0.0.1:3000",
+			"http://localhost:3000",
+			"http://127.0.0.1:3000",
 			"https://app.quantumca.com",
 		}
 		

@@ -21,7 +21,6 @@ export interface AuthResponse {
     email: string;
     tier: number;
   };
-  refreshToken?: string;
 }
 
 export interface Customer {

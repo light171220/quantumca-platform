@@ -179,25 +179,29 @@ func (s *Server) setupAPIRoutes() {
 }
 
 func (s *Server) setupHealthRoutes() {
-	health := s.engine.Group("/health")
-	{
-		healthHandler := handlers.NewHealthHandler(s.db, s.config, s.logger)
-		health.GET("/", healthHandler.Check)
-		health.GET("/live", healthHandler.Liveness)
-		health.GET("/ready", healthHandler.Readiness)
-		health.GET("/metrics", healthHandler.Metrics)
-	}
+    healthHandler := handlers.NewHealthHandler(s.db, s.config, s.logger)
+    s.engine.GET("/health", healthHandler.Check)
+    s.engine.HEAD("/health", healthHandler.Check)
+    
+    s.engine.GET("/health/live", healthHandler.Liveness)
+    s.engine.HEAD("/health/live", healthHandler.Liveness)
+    
+    s.engine.GET("/health/ready", healthHandler.Readiness)
+    s.engine.HEAD("/health/ready", healthHandler.Readiness)
+    
+    s.engine.GET("/health/metrics", healthHandler.Metrics)
+    s.engine.HEAD("/health/metrics", healthHandler.Metrics)
 
-	s.engine.GET("/version", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{
-			"service":    "quantumca-platform",
-			"version":    "1.0.0",
-			"build":      os.Getenv("BUILD_VERSION"),
-			"commit":     os.Getenv("GIT_COMMIT"),
-			"build_time": os.Getenv("BUILD_TIME"),
-			"go_version": os.Getenv("GO_VERSION"),
-		})
-	})
+    s.engine.GET("/version", func(c *gin.Context) {
+        c.JSON(http.StatusOK, gin.H{
+            "service":    "quantumca-platform",
+            "version":    "1.0.0",
+            "build":      os.Getenv("BUILD_VERSION"),
+            "commit":     os.Getenv("GIT_COMMIT"),
+            "build_time": os.Getenv("BUILD_TIME"),
+            "go_version": os.Getenv("GO_VERSION"),
+        })
+    })
 }
 
 func (s *Server) startBackgroundServices() error {

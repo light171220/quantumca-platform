@@ -170,7 +170,6 @@ generate_dev_ssl() {
 start_services() {
     log_info "Building and starting QuantumCA Platform services..."
     
-    # Copy .env file to deployment directory for docker-compose
     if [ -f "$PROJECT_ROOT/.env" ]; then
         cp "$PROJECT_ROOT/.env" "$PROJECT_ROOT/deployment/docker/.env"
         log_info "Environment file copied to deployment directory"
@@ -179,9 +178,9 @@ start_services() {
     cd "$PROJECT_ROOT/deployment/docker"
     
     if command -v docker-compose &> /dev/null; then
-        docker-compose build --no-cache
+        docker-compose build
     else
-        docker compose build --no-cache
+        docker compose build
     fi
     
     log_info "Starting services..."

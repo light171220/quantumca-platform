@@ -9,15 +9,17 @@ class AuthService {
     const request = { api_key: apiKey };
     const response = await apiService.login(request);
     
-    if (!response.token || !response.refreshToken) {
-      throw new Error('Missing token or refresh token in response');
+    if (!response.token) {
+      throw new Error('Missing token in response');
     }
-    this.setTokens(response.token, response.refreshToken);
+    
+    this.setTokens(response.token, response.token);
     return response;
   }
 
   async logout(): Promise<void> {
     this.clearTokens();
+    localStorage.removeItem('api_key');
   }
 
   async refreshToken(): Promise<AuthResponse | null> {
@@ -26,7 +28,7 @@ class AuthService {
       if (!token) return null;
       
       const response = await apiService.refreshToken(token);
-      this.setTokens(response.token, response.refreshToken!);
+      this.setTokens(response.token, response.token);
       return response;
     } catch (error) {
       this.clearTokens();
@@ -62,6 +64,7 @@ class AuthService {
   private clearTokens(): void {
     localStorage.removeItem(this.tokenKey);
     localStorage.removeItem(this.refreshTokenKey);
+    localStorage.removeItem('api_key');
   }
 }
 

@@ -271,9 +271,8 @@ func ParsePrivateKey(data []byte) (interface{}, error) {
 	}
 	
 	var keyInfo PrivateKeyInfo
-	
 	if _, err := asn1.Unmarshal(data, &keyInfo); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal private key: %w", err)
+		return ParseMultiPQCPrivateKey(data)
 	}
 
 	switch keyInfo.Algorithm {
@@ -340,9 +339,8 @@ func ParsePublicKey(data []byte) (interface{}, error) {
 	}
 	
 	var keyInfo PublicKeyInfo
-	
 	if _, err := asn1.Unmarshal(data, &keyInfo); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal public key: %w", err)
+		return ParseMultiPQCPublicKey(data)
 	}
 
 	switch keyInfo.Algorithm {

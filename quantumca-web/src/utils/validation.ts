@@ -11,7 +11,7 @@ export const domainSchema = z.string()
 
 export const apiKeySchema = z.string()
   .min(32, 'API key must be at least 32 characters')
-  .regex(/^[a-zA-Z0-9_-]+$/, 'API key contains invalid characters');
+  .regex(/^[a-zA-Z0-9_\-=+/]+$/, 'API key contains invalid characters');
 
 export const customerFormSchema = z.object({
   name: z.string().min(1, 'Name is required').max(100, 'Name too long'),

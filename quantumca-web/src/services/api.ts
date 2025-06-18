@@ -23,7 +23,7 @@ class ApiService {
 
   constructor() {
     this.client = axios.create({
-      baseURL: process.env.REACT_APP_API_URL || 'https://localhost:8080/api/v1',
+      baseURL: process.env.REACT_APP_API_URL || 'http://localhost:8080/api/v1',
       timeout: 30000,
       headers: {
         'Content-Type': 'application/json',
@@ -36,9 +36,10 @@ class ApiService {
   private setupInterceptors() {
     this.client.interceptors.request.use(
       (config) => {
-        const token = localStorage.getItem('auth_token');
-        if (token) {
-          config.headers.Authorization = `Bearer ${token}`;
+        // For protected routes, use the original API key, not the JWT token
+        const apiKey = localStorage.getItem('api_key');
+        if (apiKey) {
+          config.headers.Authorization = `Bearer ${apiKey}`;
         }
         return config;
       },
@@ -49,8 +50,10 @@ class ApiService {
       (response) => response,
       async (error) => {
         if (error.response?.status === 401) {
+          // Clear auth data and redirect to login
           localStorage.removeItem('auth_token');
           localStorage.removeItem('refresh_token');
+          localStorage.removeItem('api_key');
           window.location.href = '/login';
         }
         return Promise.reject(error);
@@ -60,6 +63,8 @@ class ApiService {
 
   async login(request: { api_key: string }): Promise<AuthResponse> {
     const response = await this.client.post<AuthResponse>('/auth/login', request);
+    // Store the original API key for future API calls
+    localStorage.setItem('api_key', request.api_key);
     return response.data;
   }
 
@@ -254,7 +259,7 @@ class ApiService {
 
   async getHealth(): Promise<HealthStatus> {
     const healthClient = axios.create({
-      baseURL: process.env.REACT_APP_HEALTH_URL || 'https://your-api-domain.com/health',
+      baseURL: process.env.REACT_APP_HEALTH_URL || 'http://localhost:8080/health',
       timeout: 10000,
     });
     
@@ -264,7 +269,7 @@ class ApiService {
 
   async getHealthMetrics(): Promise<SystemMetrics> {
     const healthClient = axios.create({
-      baseURL: process.env.REACT_APP_HEALTH_URL || 'https://your-api-domain.com/health',
+      baseURL: process.env.REACT_APP_HEALTH_URL || 'http://localhost:8080/health',
       timeout: 10000,
     });
     

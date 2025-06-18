@@ -13,9 +13,9 @@ import {
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 
 const Dashboard: React.FC = () => {
-  const { data: healthData, loading: healthLoading } = useApi(() => apiService.getHealth());
-  const { data: metricsData, loading: metricsLoading } = useApi(() => apiService.getHealthMetrics());
-  const { data: certificatesData, loading: certLoading } = useApi(() => 
+  const { data: healthData, loading: healthLoading, error: healthError } = useApi(() => apiService.getHealth());
+  const { data: metricsData, loading: metricsLoading, error: metricsError } = useApi(() => apiService.getHealthMetrics());
+  const { data: certificatesData, loading: certLoading, error: certError } = useApi(() => 
     apiService.getCertificates({ page_size: 5 })
   );
 
@@ -65,6 +65,25 @@ const Dashboard: React.FC = () => {
     return (
       <div className="flex items-center justify-center min-h-96">
         <LoadingSpinner size="lg" text="Loading dashboard..." />
+      </div>
+    );
+  }
+
+  if (healthError || metricsError || certError) {
+    return (
+      <div className="flex items-center justify-center min-h-96">
+        <div className="text-center">
+          <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-2">Error Loading Dashboard</h2>
+          <p className="text-gray-600 dark:text-gray-400">
+            {healthError || metricsError || certError}
+          </p>
+          <button 
+            onClick={() => window.location.reload()} 
+            className="mt-4 btn-primary"
+          >
+            Retry
+          </button>
+        </div>
       </div>
     );
   }
@@ -175,7 +194,7 @@ const Dashboard: React.FC = () => {
           </h3>
         </div>
         <div className="card-body">
-          {certificatesData?.data.length ? (
+          {certificatesData?.data && certificatesData.data.length > 0 ? (
             <div className="space-y-3">
               {certificatesData.data.map((cert) => (
                 <div key={cert.id} className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700 rounded-lg">

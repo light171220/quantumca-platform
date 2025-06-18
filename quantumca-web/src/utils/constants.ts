@@ -1,4 +1,4 @@
-export const API_BASE_URL = process.env.REACT_APP_API_URL || 'https://your-api-domain.com/api/v1';
+export const API_BASE_URL = '/api';
 
 export const CERTIFICATE_STATUS = {
   PENDING: 'pending',
