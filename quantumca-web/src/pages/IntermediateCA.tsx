@@ -1,3 +1,4 @@
+/* eslint-disable no-restricted-globals */
 import React, { useState } from 'react';
 import { useApi, useMutation } from '../hooks/useApi';
 import { apiService } from '../services/api';

@@ -1,3 +1,4 @@
+/* eslint-disable no-restricted-globals */
 import React, { useState } from 'react';
 import { useApi, useMutation } from '../hooks/useApi';
 import { apiService } from '../services/api';
@@ -7,9 +8,9 @@ import DataTable from '../components/DataTable';
 import StatusBadge from '../components/StatusBadge';
 import Modal from '../components/Modal';
 import LoadingSpinner from '../components/LoadingSpinner';
-import { formatDate, formatRelativeTime, copyToClipboard } from '../utils/helpers';
+import { formatRelativeTime, copyToClipboard } from '../utils/helpers';
 import { domainFormSchema, DomainFormData } from '../utils/validation';
-import { PlusIcon, CheckIcon, TrashIcon, ClipboardDocumentIcon } from '@heroicons/react/24/outline';
+import { PlusIcon, CheckIcon, ClipboardDocumentIcon } from '@heroicons/react/24/outline';
 import toast from 'react-hot-toast';
 
 const Domains: React.FC = () => {
@@ -216,8 +217,9 @@ const Domains: React.FC = () => {
           </div>
 
           <div>
-            <label className="form-label">Validation Type</label>
+            <label className="form-label" htmlFor="validationType">Validation Type</label>
             <select
+              id="validationType"
               className="form-input"
               value={formData.validationType}
               onChange={(e) => setFormData(prev => ({ ...prev, validationType: e.target.value as 'dns-txt' | 'http-01' }))}
@@ -279,6 +281,7 @@ const Domains: React.FC = () => {
                         <button
                           onClick={() => copyValidationInfo(validationInfo.instructions.dnsRecord!.name)}
                           className="text-gray-500 hover:text-gray-700"
+                          title="Copy DNS record name"
                         >
                           <ClipboardDocumentIcon className="w-4 h-4" />
                         </button>

@@ -11,7 +11,7 @@ import {
   SignalIcon,
   ExclamationTriangleIcon,
 } from '@heroicons/react/24/outline';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar } from 'recharts';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 
 const Monitoring: React.FC = () => {
   const { data: healthData, loading: healthLoading } = useApi(() => apiService.getHealth());
@@ -29,10 +29,6 @@ const Monitoring: React.FC = () => {
     { time: '20:00', responseTime: 46, requests: 160, errors: 2 },
   ];
 
-  const certificateStatsData = [
-    { name: 'Active', value: metricsData?.active_certificates || 0 },
-    { name: 'Total', value: metricsData?.active_certificates || 0 },
-  ];
 
   if (loading) {
     return (
