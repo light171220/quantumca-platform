@@ -64,12 +64,12 @@ const Templates: React.FC = () => {
                 <div className="flex justify-between text-sm">
                   <span className="text-gray-500 dark:text-gray-400">Key Usage:</span>
                   <span className="font-medium text-right">
-                    {template.key_usages.length > 0 ? template.key_usages.join(', ') : 'None'}
+                    {template.key_usages && template.key_usages.length > 0 ? template.key_usages.join(', ') : 'None'}
                   </span>
                 </div>
                 <div className="flex justify-between text-sm">
                   <span className="text-gray-500 dark:text-gray-400">Max Validity:</span>
-                  <span className="font-medium">{template.max_validity_days} days</span>
+                  <span className="font-medium">{template.max_validity_days || 0} days</span>
                 </div>
                 <div className="flex justify-between text-sm">
                   <span className="text-gray-500 dark:text-gray-400">Is CA:</span>
@@ -119,11 +119,11 @@ const Templates: React.FC = () => {
               </div>
               <div>
                 <label className="form-label">Validity Period</label>
-                <p className="text-sm text-gray-900 dark:text-white">{selectedTemplate.validity_days} days</p>
+                <p className="text-sm text-gray-900 dark:text-white">{selectedTemplate.validity_days || 0} days</p>
               </div>
               <div>
                 <label className="form-label">Max Validity</label>
-                <p className="text-sm text-gray-900 dark:text-white">{selectedTemplate.max_validity_days} days</p>
+                <p className="text-sm text-gray-900 dark:text-white">{selectedTemplate.max_validity_days || 0} days</p>
               </div>
               <div>
                 <label className="form-label">Is CA</label>
@@ -138,13 +138,13 @@ const Templates: React.FC = () => {
               <div className="col-span-2">
                 <label className="form-label">Key Usages</label>
                 <p className="text-sm text-gray-900 dark:text-white">
-                  {selectedTemplate.key_usages.length > 0 ? selectedTemplate.key_usages.join(', ') : 'None specified'}
+                  {selectedTemplate.key_usages && selectedTemplate.key_usages.length > 0 ? selectedTemplate.key_usages.join(', ') : 'None specified'}
                 </p>
               </div>
               <div className="col-span-2">
                 <label className="form-label">Extended Key Usages</label>
                 <p className="text-sm text-gray-900 dark:text-white">
-                  {selectedTemplate.ext_key_usages.length > 0 ? selectedTemplate.ext_key_usages.join(', ') : 'None specified'}
+                  {selectedTemplate.ext_key_usages && selectedTemplate.ext_key_usages.length > 0 ? selectedTemplate.ext_key_usages.join(', ') : 'None specified'}
                 </p>
               </div>
               {selectedTemplate.policies && Object.keys(selectedTemplate.policies).length > 0 && (
