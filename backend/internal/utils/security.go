@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"math/big"
 	"strings"
 	"time"
 
@@ -285,6 +286,59 @@ func GenerateRandomBytes(n int) ([]byte, error) {
 		return nil, fmt.Errorf("failed to generate random bytes: %w", err)
 	}
 	return bytes, nil
+}
+
+func GenerateRandomString(length int) (string, error) {
+	if length <= 0 {
+		return "", fmt.Errorf("length must be positive")
+	}
+
+	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	result := make([]byte, length)
+	
+	for i := range result {
+		num, err := rand.Int(rand.Reader, big.NewInt(int64(len(charset))))
+		if err != nil {
+			return "", fmt.Errorf("failed to generate random number: %w", err)
+		}
+		result[i] = charset[num.Int64()]
+	}
+	
+	return string(result), nil
+}
+
+func GenerateRandomStringWithCharset(length int, charset string) (string, error) {
+	if length <= 0 {
+		return "", fmt.Errorf("length must be positive")
+	}
+	
+	if len(charset) == 0 {
+		return "", fmt.Errorf("charset cannot be empty")
+	}
+
+	result := make([]byte, length)
+	
+	for i := range result {
+		num, err := rand.Int(rand.Reader, big.NewInt(int64(len(charset))))
+		if err != nil {
+			return "", fmt.Errorf("failed to generate random number: %w", err)
+		}
+		result[i] = charset[num.Int64()]
+	}
+	
+	return string(result), nil
+}
+
+func GenerateAlphanumericString(length int) (string, error) {
+	return GenerateRandomStringWithCharset(length, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
+}
+
+func GenerateNumericString(length int) (string, error) {
+	return GenerateRandomStringWithCharset(length, "0123456789")
+}
+
+func GenerateAlphabeticString(length int) (string, error) {
+	return GenerateRandomStringWithCharset(length, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
 }
 
 func DeriveKey(password, salt []byte, keyLen int) ([]byte, error) {

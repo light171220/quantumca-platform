@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -18,6 +19,7 @@ type DomainValidator struct {
 	dnsTimeout  time.Duration
 	httpTimeout time.Duration
 	httpClient  *http.Client
+	maxWorkers  int
 }
 
 type ValidationResult struct {
@@ -43,6 +45,25 @@ type HTTPChallenge struct {
 	ExpiresAt time.Time
 }
 
+type domainValidationTask struct {
+	domain string
+	token  string
+	index  int
+}
+
+type domainValidationResult struct {
+	index   int
+	domain  string
+	result  *ValidationResult
+	error   error
+}
+
+type sanValidationResult struct {
+	index int
+	san   string
+	error error
+}
+
 func NewDomainValidator() *DomainValidator {
 	transport := &http.Transport{
 		TLSClientConfig: &tls.Config{
@@ -65,6 +86,7 @@ func NewDomainValidator() *DomainValidator {
 			Transport: transport,
 			Timeout:   30 * time.Second,
 		},
+		maxWorkers: 10,
 	}
 }
 
@@ -73,9 +95,69 @@ func (dv *DomainValidator) ValidateSubjectAltNames(sans []string) error {
 		return fmt.Errorf("too many subject alternative names (max 100)")
 	}
 
-	for _, san := range sans {
-		if err := dv.ValidateSingleSAN(san); err != nil {
-			return fmt.Errorf("invalid SAN '%s': %w", san, err)
+	if len(sans) == 0 {
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(len(sans))*5*time.Second)
+	defer cancel()
+
+	return dv.validateSANsParallel(ctx, sans)
+}
+
+func (dv *DomainValidator) validateSANsParallel(ctx context.Context, sans []string) error {
+	numWorkers := dv.maxWorkers
+	if numWorkers > len(sans) {
+		numWorkers = len(sans)
+	}
+
+	sanChan := make(chan struct {
+		san   string
+		index int
+	}, len(sans))
+	
+	resultChan := make(chan sanValidationResult, len(sans))
+	var wg sync.WaitGroup
+
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			
+			for task := range sanChan {
+				select {
+				case <-ctx.Done():
+					resultChan <- sanValidationResult{index: task.index, san: task.san, error: ctx.Err()}
+					return
+				default:
+				}
+				
+				if err := dv.ValidateSingleSAN(task.san); err != nil {
+					resultChan <- sanValidationResult{index: task.index, san: task.san, error: fmt.Errorf("invalid SAN '%s': %w", task.san, err)}
+					continue
+				}
+				
+				resultChan <- sanValidationResult{index: task.index, san: task.san, error: nil}
+			}
+		}()
+	}
+
+	for i, san := range sans {
+		sanChan <- struct {
+			san   string
+			index int
+		}{san: san, index: i}
+	}
+	close(sanChan)
+
+	go func() {
+		wg.Wait()
+		close(resultChan)
+	}()
+
+	for result := range resultChan {
+		if result.error != nil {
+			return result.error
 		}
 	}
 
@@ -228,6 +310,13 @@ func (dv *DomainValidator) GenerateValidationToken() (string, error) {
 }
 
 func (dv *DomainValidator) ValidateDomainControlActual(domain, token string) (*ValidationResult, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), dv.dnsTimeout+dv.httpTimeout)
+	defer cancel()
+
+	return dv.validateDomainControlParallel(ctx, domain, token)
+}
+
+func (dv *DomainValidator) validateDomainControlParallel(ctx context.Context, domain, token string) (*ValidationResult, error) {
 	result := &ValidationResult{
 		Valid:  false,
 		Token:  token,
@@ -239,8 +328,95 @@ func (dv *DomainValidator) ValidateDomainControlActual(domain, token string) (*V
 		return result, nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), dv.dnsTimeout)
-	defer cancel()
+	type validationAttempt struct {
+		method string
+		result *ValidationResult
+		error  error
+	}
+
+	resultChan := make(chan validationAttempt, 2)
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		
+		select {
+		case <-ctx.Done():
+			resultChan <- validationAttempt{method: "dns", error: ctx.Err()}
+			return
+		default:
+		}
+		
+		dnsResult := dv.validateDNSChallenge(ctx, domain, token)
+		resultChan <- validationAttempt{method: "dns", result: dnsResult}
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		
+		select {
+		case <-ctx.Done():
+			resultChan <- validationAttempt{method: "http", error: ctx.Err()}
+			return
+		default:
+		}
+		
+		httpResult := dv.validateHTTPChallengeActual(domain, token)
+		resultChan <- validationAttempt{method: "http", result: httpResult}
+	}()
+
+	go func() {
+		wg.Wait()
+		close(resultChan)
+	}()
+
+	var dnsError, httpError error
+	var dnsResult, httpResult *ValidationResult
+
+	for attempt := range resultChan {
+		if attempt.error != nil {
+			if attempt.method == "dns" {
+				dnsError = attempt.error
+			} else {
+				httpError = attempt.error
+			}
+			continue
+		}
+
+		if attempt.method == "dns" {
+			dnsResult = attempt.result
+		} else {
+			httpResult = attempt.result
+		}
+	}
+
+	if dnsResult != nil && dnsResult.Valid {
+		return dnsResult, nil
+	}
+
+	if httpResult != nil && httpResult.Valid {
+		return httpResult, nil
+	}
+
+	if dnsError != nil && httpError != nil {
+		result.Details = fmt.Sprintf("DNS and HTTP validation failed - DNS: %v, HTTP: %v", dnsError, httpError)
+	} else if dnsResult != nil && httpResult != nil {
+		result.Details = fmt.Sprintf("DNS and HTTP validation failed - DNS: %s, HTTP: %s", dnsResult.Details, httpResult.Details)
+	} else {
+		result.Details = "Both DNS and HTTP validation failed"
+	}
+
+	return result, nil
+}
+
+func (dv *DomainValidator) validateDNSChallenge(ctx context.Context, domain, token string) *ValidationResult {
+	result := &ValidationResult{
+		Valid:  false,
+		Token:  token,
+		Method: "dns-txt",
+	}
 
 	recordName := fmt.Sprintf("_quantumca-challenge.%s", domain)
 
@@ -266,13 +442,8 @@ func (dv *DomainValidator) ValidateDomainControlActual(domain, token string) (*V
 
 	txtRecords, err := resolver.LookupTXT(ctx, recordName)
 	if err != nil {
-		result.Method = "http-01"
-		httpResult := dv.validateHTTPChallengeActual(domain, token)
-		if httpResult.Valid {
-			return httpResult, nil
-		}
-		result.Details = fmt.Sprintf("DNS and HTTP validation failed - DNS: %v, HTTP: %s", err, httpResult.Details)
-		return result, nil
+		result.Details = fmt.Sprintf("DNS TXT lookup failed: %v", err)
+		return result
 	}
 
 	challengePrefix := "quantumca-domain-validation="
@@ -282,19 +453,13 @@ func (dv *DomainValidator) ValidateDomainControlActual(domain, token string) (*V
 			if strings.TrimSpace(recordToken) == token {
 				result.Valid = true
 				result.Details = fmt.Sprintf("Valid TXT record found: %s", record)
-				return result, nil
+				return result
 			}
 		}
 	}
 
-	result.Method = "http-01"
-	httpResult := dv.validateHTTPChallengeActual(domain, token)
-	if httpResult.Valid {
-		return httpResult, nil
-	}
-
-	result.Details = "Token not found in DNS TXT records and HTTP validation failed"
-	return result, nil
+	result.Details = "Token not found in DNS TXT records"
+	return result
 }
 
 func (dv *DomainValidator) validateHTTPChallengeActual(domain, token string) *ValidationResult {
@@ -311,8 +476,44 @@ func (dv *DomainValidator) validateHTTPChallengeActual(domain, token string) *Va
 		fmt.Sprintf("http://www.%s%s", domain, challengePath),
 	}
 
-	for _, challengeURL := range httpURLs {
-		if dv.tryHTTPChallenge(challengeURL, token, result) {
+	ctx, cancel := context.WithTimeout(context.Background(), dv.httpTimeout)
+	defer cancel()
+
+	return dv.validateHTTPURLsParallel(ctx, httpURLs, token, result)
+}
+
+func (dv *DomainValidator) validateHTTPURLsParallel(ctx context.Context, urls []string, token string, result *ValidationResult) *ValidationResult {
+	resultChan := make(chan bool, len(urls))
+	var wg sync.WaitGroup
+
+	for _, url := range urls {
+		wg.Add(1)
+		go func(challengeURL string) {
+			defer wg.Done()
+			
+			select {
+			case <-ctx.Done():
+				resultChan <- false
+				return
+			default:
+			}
+			
+			success := dv.tryHTTPChallenge(ctx, challengeURL, token)
+			if success {
+				result.Valid = true
+				result.Details = fmt.Sprintf("Valid HTTP challenge response from %s", challengeURL)
+			}
+			resultChan <- success
+		}(url)
+	}
+
+	go func() {
+		wg.Wait()
+		close(resultChan)
+	}()
+
+	for success := range resultChan {
+		if success {
 			return result
 		}
 	}
@@ -321,10 +522,7 @@ func (dv *DomainValidator) validateHTTPChallengeActual(domain, token string) *Va
 	return result
 }
 
-func (dv *DomainValidator) tryHTTPChallenge(challengeURL, token string, result *ValidationResult) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), dv.httpTimeout)
-	defer cancel()
-
+func (dv *DomainValidator) tryHTTPChallenge(ctx context.Context, challengeURL, token string) bool {
 	req, err := http.NewRequestWithContext(ctx, "GET", challengeURL, nil)
 	if err != nil {
 		return false
@@ -368,13 +566,7 @@ func (dv *DomainValidator) tryHTTPChallenge(challengeURL, token string, result *
 	responseContent := strings.TrimSpace(string(body))
 	expectedContent := fmt.Sprintf("quantumca-domain-validation:%s", token)
 	
-	if responseContent == expectedContent {
-		result.Valid = true
-		result.Details = fmt.Sprintf("Valid HTTP challenge response from %s", challengeURL)
-		return true
-	}
-
-	return false
+	return responseContent == expectedContent
 }
 
 func (dv *DomainValidator) CreateDNSChallenge(domain string) (*DNSChallenge, error) {
@@ -482,31 +674,84 @@ func (dv *DomainValidator) ValidateDomainOwnership(domains []string, customerID 
 		return fmt.Errorf("no domains to validate")
 	}
 
-	for _, domain := range domains {
-		if err := dv.validateDomainName(domain); err != nil {
-			return fmt.Errorf("invalid domain %s: %w", domain, err)
-		}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(len(domains))*30*time.Second)
+	defer cancel()
 
+	return dv.validateDomainOwnershipParallel(ctx, domains, customerID)
+}
+
+func (dv *DomainValidator) validateDomainOwnershipParallel(ctx context.Context, domains []string, customerID int) error {
+	numWorkers := dv.maxWorkers
+	if numWorkers > len(domains) {
+		numWorkers = len(domains)
+	}
+
+	taskChan := make(chan domainValidationTask, len(domains))
+	resultChan := make(chan domainValidationResult, len(domains))
+	var wg sync.WaitGroup
+
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			
+			for task := range taskChan {
+				select {
+				case <-ctx.Done():
+					resultChan <- domainValidationResult{index: task.index, domain: task.domain, error: ctx.Err()}
+					return
+				default:
+				}
+				
+				if err := dv.validateDomainName(task.domain); err != nil {
+					resultChan <- domainValidationResult{index: task.index, domain: task.domain, error: fmt.Errorf("invalid domain %s: %w", task.domain, err)}
+					continue
+				}
+
+				var result *ValidationResult
+				var validationErr error
+				
+				if strings.HasPrefix(task.domain, "*.") {
+					result, validationErr = dv.ValidateWildcardDomainActual(task.domain, task.token)
+				} else {
+					result, validationErr = dv.ValidateDomainControlActual(task.domain, task.token)
+				}
+
+				if validationErr != nil {
+					resultChan <- domainValidationResult{index: task.index, domain: task.domain, error: fmt.Errorf("validation error for domain %s: %w", task.domain, validationErr)}
+					continue
+				}
+
+				if !result.Valid {
+					resultChan <- domainValidationResult{index: task.index, domain: task.domain, error: fmt.Errorf("domain validation failed for %s: %s", task.domain, result.Details)}
+					continue
+				}
+				
+				resultChan <- domainValidationResult{index: task.index, domain: task.domain, result: result, error: nil}
+			}
+		}()
+	}
+
+	for i, domain := range domains {
 		token, err := dv.GenerateValidationToken()
 		if err != nil {
+			close(taskChan)
+			wg.Wait()
 			return fmt.Errorf("failed to generate token for domain %s: %w", domain, err)
 		}
-
-		var result *ValidationResult
-		var validationErr error
 		
-		if strings.HasPrefix(domain, "*.") {
-			result, validationErr = dv.ValidateWildcardDomainActual(domain, token)
-		} else {
-			result, validationErr = dv.ValidateDomainControlActual(domain, token)
-		}
+		taskChan <- domainValidationTask{domain: domain, token: token, index: i}
+	}
+	close(taskChan)
 
-		if validationErr != nil {
-			return fmt.Errorf("validation error for domain %s: %w", domain, validationErr)
-		}
+	go func() {
+		wg.Wait()
+		close(resultChan)
+	}()
 
-		if !result.Valid {
-			return fmt.Errorf("domain validation failed for %s: %s", domain, result.Details)
+	for result := range resultChan {
+		if result.error != nil {
+			return result.error
 		}
 	}
 
@@ -517,6 +762,12 @@ func (dv *DomainValidator) SetTimeouts(dnsTimeout, httpTimeout time.Duration) {
 	dv.dnsTimeout = dnsTimeout
 	dv.httpTimeout = httpTimeout
 	dv.httpClient.Timeout = httpTimeout
+}
+
+func (dv *DomainValidator) SetMaxWorkers(maxWorkers int) {
+	if maxWorkers > 0 {
+		dv.maxWorkers = maxWorkers
+	}
 }
 
 func (dv *DomainValidator) VerifyCAA(domain string) error {
@@ -567,13 +818,40 @@ func (dv *DomainValidator) CheckDomainReachability(domain string) error {
 	
 	ports := []string{"80", "443"}
 	
+	resultChan := make(chan bool, len(ports))
+	var wg sync.WaitGroup
+	
 	for _, port := range ports {
-		conn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(domain, port))
-		if err != nil {
-			continue
+		wg.Add(1)
+		go func(p string) {
+			defer wg.Done()
+			
+			select {
+			case <-ctx.Done():
+				resultChan <- false
+				return
+			default:
+			}
+			
+			conn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(domain, p))
+			if err != nil {
+				resultChan <- false
+				return
+			}
+			conn.Close()
+			resultChan <- true
+		}(port)
+	}
+	
+	go func() {
+		wg.Wait()
+		close(resultChan)
+	}()
+	
+	for reachable := range resultChan {
+		if reachable {
+			return nil
 		}
-		conn.Close()
-		return nil
 	}
 
 	return fmt.Errorf("domain %s is not reachable on ports 80 or 443", domain)

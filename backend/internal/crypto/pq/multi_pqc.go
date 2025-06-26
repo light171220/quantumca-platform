@@ -1,11 +1,15 @@
 package pq
 
 import (
+	"context"
 	"crypto"
 	"crypto/sha256"
 	"encoding/asn1"
 	"fmt"
 	"io"
+	"runtime"
+	"sync"
+	"time"
 )
 
 type MultiPQCPrivateKey struct {
@@ -42,6 +46,27 @@ type MultiPQCKeyInfo struct {
 	CombinedID []byte   `json:"combined_id"`
 }
 
+type signatureResult struct {
+	signature []byte
+	err       error
+	index     int
+}
+
+type keyGenResult struct {
+	privateKey interface{}
+	publicKey  interface{}
+	err        error
+	index      int
+}
+
+type verificationResult struct {
+	valid bool
+	err   error
+	index int
+}
+
+var defaultTimeout = 30 * time.Second
+
 func (m *MultiPQCPrivateKey) Public() crypto.PublicKey {
 	multiPQCPublic, err := m.GetPublicKey()
 	if err != nil {
@@ -60,221 +85,425 @@ func (m *MultiPQCPrivateKey) Sign(rand io.Reader, digest []byte, opts crypto.Sig
 }
 
 func GenerateMultiPQCKeyPair() (*MultiPQCPrivateKey, error) {
-	primaryAlg := "dilithium3"
-	secondaryAlg := "sphincs-sha256-128s"
-	tertiaryAlg := "dilithium5"
+	return GenerateMultiPQCKeyPairWithTimeout(defaultTimeout)
+}
 
-	fmt.Printf("Generating multi-PQC key with algorithms: %s, %s, %s\n", primaryAlg, secondaryAlg, tertiaryAlg)
-
-	primaryPriv, err := GenerateKey(primaryAlg)
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate primary key (%s): %w", primaryAlg, err)
+func GenerateMultiPQCKeyPairWithTimeout(timeout time.Duration) (*MultiPQCPrivateKey, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	
+	algorithms := []string{"dilithium3", "sphincs-sha256-128s", "dilithium5"}
+	
+	resultChan := make(chan keyGenResult, len(algorithms))
+	var wg sync.WaitGroup
+	
+	for i, alg := range algorithms {
+		wg.Add(1)
+		go func(index int, algorithm string) {
+			defer wg.Done()
+			
+			select {
+			case <-ctx.Done():
+				resultChan <- keyGenResult{err: ctx.Err(), index: index}
+				return
+			default:
+			}
+			
+			privateKey, err := GenerateKey(algorithm)
+			if err != nil {
+				resultChan <- keyGenResult{err: fmt.Errorf("failed to generate %s key: %w", algorithm, err), index: index}
+				return
+			}
+			
+			publicKey, err := GetPublicKey(privateKey)
+			if err != nil {
+				resultChan <- keyGenResult{err: fmt.Errorf("failed to get %s public key: %w", algorithm, err), index: index}
+				return
+			}
+			
+			resultChan <- keyGenResult{privateKey: privateKey, publicKey: publicKey, index: index}
+		}(i, alg)
 	}
-
-	secondaryPriv, err := GenerateKey(secondaryAlg)
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate secondary key (%s): %w", secondaryAlg, err)
+	
+	go func() {
+		wg.Wait()
+		close(resultChan)
+	}()
+	
+	keys := make([]interface{}, len(algorithms))
+	pubKeys := make([]interface{}, len(algorithms))
+	
+	for result := range resultChan {
+		if result.err != nil {
+			return nil, result.err
+		}
+		keys[result.index] = result.privateKey
+		pubKeys[result.index] = result.publicKey
 	}
-
-	tertiaryPriv, err := GenerateKey(tertiaryAlg)
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate tertiary key (%s): %w", tertiaryAlg, err)
-	}
-
-	primaryPub, err := GetPublicKey(primaryPriv)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get primary public key: %w", err)
-	}
-
-	secondaryPub, err := GetPublicKey(secondaryPriv)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get secondary public key: %w", err)
-	}
-
-	tertiaryPub, err := GetPublicKey(tertiaryPriv)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get tertiary public key: %w", err)
-	}
-
-	combinedID, err := generateCombinedKeyID(primaryPub, secondaryPub, tertiaryPub)
+	
+	combinedID, err := generateCombinedKeyID(pubKeys[0], pubKeys[1], pubKeys[2])
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate combined key ID: %w", err)
 	}
-
+	
 	return &MultiPQCPrivateKey{
-		PrimaryAlgorithm:   primaryAlg,
-		SecondaryAlgorithm: secondaryAlg,
-		TertiaryAlgorithm:  tertiaryAlg,
-		PrimaryKey:         primaryPriv,
-		SecondaryKey:       secondaryPriv,
-		TertiaryKey:        tertiaryPriv,
+		PrimaryAlgorithm:   algorithms[0],
+		SecondaryAlgorithm: algorithms[1],
+		TertiaryAlgorithm:  algorithms[2],
+		PrimaryKey:         keys[0],
+		SecondaryKey:       keys[1],
+		TertiaryKey:        keys[2],
 		CombinedKeyID:      combinedID,
 	}, nil
 }
 
 func (m *MultiPQCPrivateKey) GetPublicKey() (*MultiPQCPublicKey, error) {
-	primaryPub, err := GetPublicKey(m.PrimaryKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get primary public key: %w", err)
+	ctx, cancel := context.WithTimeout(context.Background(), defaultTimeout)
+	defer cancel()
+	
+	keys := []interface{}{m.PrimaryKey, m.SecondaryKey, m.TertiaryKey}
+	resultChan := make(chan keyGenResult, len(keys))
+	var wg sync.WaitGroup
+	
+	for i, key := range keys {
+		wg.Add(1)
+		go func(index int, privateKey interface{}) {
+			defer wg.Done()
+			
+			select {
+			case <-ctx.Done():
+				resultChan <- keyGenResult{err: ctx.Err(), index: index}
+				return
+			default:
+			}
+			
+			publicKey, err := GetPublicKey(privateKey)
+			if err != nil {
+				resultChan <- keyGenResult{err: err, index: index}
+				return
+			}
+			
+			resultChan <- keyGenResult{publicKey: publicKey, index: index}
+		}(i, key)
 	}
-
-	secondaryPub, err := GetPublicKey(m.SecondaryKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get secondary public key: %w", err)
+	
+	go func() {
+		wg.Wait()
+		close(resultChan)
+	}()
+	
+	pubKeys := make([]interface{}, len(keys))
+	
+	for result := range resultChan {
+		if result.err != nil {
+			return nil, fmt.Errorf("failed to get public key: %w", result.err)
+		}
+		pubKeys[result.index] = result.publicKey
 	}
-
-	tertiaryPub, err := GetPublicKey(m.TertiaryKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get tertiary public key: %w", err)
-	}
-
+	
 	return &MultiPQCPublicKey{
 		PrimaryAlgorithm:   m.PrimaryAlgorithm,
 		SecondaryAlgorithm: m.SecondaryAlgorithm,
 		TertiaryAlgorithm:  m.TertiaryAlgorithm,
-		PrimaryKey:         primaryPub,
-		SecondaryKey:       secondaryPub,
-		TertiaryKey:        tertiaryPub,
+		PrimaryKey:         pubKeys[0],
+		SecondaryKey:       pubKeys[1],
+		TertiaryKey:        pubKeys[2],
 		CombinedKeyID:      m.CombinedKeyID,
 	}, nil
 }
 
 func (m *MultiPQCPrivateKey) SignMessage(message []byte) (*MultiPQCSignature, error) {
-	primarySig, err := Sign(m.PrimaryKey, message)
-	if err != nil {
-		return nil, fmt.Errorf("primary signature failed: %w", err)
+	return m.SignMessageWithTimeout(message, defaultTimeout)
+}
+
+func (m *MultiPQCPrivateKey) SignMessageWithTimeout(message []byte, timeout time.Duration) (*MultiPQCSignature, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	
+	keys := []interface{}{m.PrimaryKey, m.SecondaryKey, m.TertiaryKey}
+	algorithms := []string{m.PrimaryAlgorithm, m.SecondaryAlgorithm, m.TertiaryAlgorithm}
+	
+	resultChan := make(chan signatureResult, len(keys))
+	var wg sync.WaitGroup
+	
+	for i, key := range keys {
+		wg.Add(1)
+		go func(index int, privateKey interface{}) {
+			defer wg.Done()
+			
+			select {
+			case <-ctx.Done():
+				resultChan <- signatureResult{err: ctx.Err(), index: index}
+				return
+			default:
+			}
+			
+			signature, err := Sign(privateKey, message)
+			if err != nil {
+				resultChan <- signatureResult{err: fmt.Errorf("%s signature failed: %w", algorithms[index], err), index: index}
+				return
+			}
+			
+			resultChan <- signatureResult{signature: signature, index: index}
+		}(i, key)
 	}
-
-	secondarySig, err := Sign(m.SecondaryKey, message)
-	if err != nil {
-		return nil, fmt.Errorf("secondary signature failed: %w", err)
+	
+	go func() {
+		wg.Wait()
+		close(resultChan)
+	}()
+	
+	signatures := make([][]byte, len(keys))
+	
+	for result := range resultChan {
+		if result.err != nil {
+			return nil, result.err
+		}
+		signatures[result.index] = result.signature
 	}
-
-	tertiarySig, err := Sign(m.TertiaryKey, message)
-	if err != nil {
-		return nil, fmt.Errorf("tertiary signature failed: %w", err)
-	}
-
-	combinedHash := sha256.Sum256(append(append(primarySig, secondarySig...), tertiarySig...))
-
+	
+	combinedHash := sha256.Sum256(append(append(signatures[0], signatures[1]...), signatures[2]...))
+	
 	return &MultiPQCSignature{
-		PrimarySignature:   primarySig,
-		SecondarySignature: secondarySig,
-		TertiarySignature:  tertiarySig,
-		Algorithms:         []string{m.PrimaryAlgorithm, m.SecondaryAlgorithm, m.TertiaryAlgorithm},
+		PrimarySignature:   signatures[0],
+		SecondarySignature: signatures[1],
+		TertiarySignature:  signatures[2],
+		Algorithms:         algorithms,
 		CombinedHash:       combinedHash[:],
 	}, nil
 }
 
 func (m *MultiPQCPublicKey) Verify(message []byte, signature *MultiPQCSignature) bool {
+	return m.VerifyWithTimeout(message, signature, defaultTimeout)
+}
+
+func (m *MultiPQCPublicKey) VerifyWithTimeout(message []byte, signature *MultiPQCSignature, timeout time.Duration) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	
 	if len(signature.Algorithms) != 3 {
 		return false
 	}
-
+	
 	if signature.Algorithms[0] != m.PrimaryAlgorithm ||
 		signature.Algorithms[1] != m.SecondaryAlgorithm ||
 		signature.Algorithms[2] != m.TertiaryAlgorithm {
 		return false
 	}
-
-	primaryValid := Verify(m.PrimaryKey, message, signature.PrimarySignature)
-	if !primaryValid {
-		return false
+	
+	keys := []interface{}{m.PrimaryKey, m.SecondaryKey, m.TertiaryKey}
+	sigs := [][]byte{signature.PrimarySignature, signature.SecondarySignature, signature.TertiarySignature}
+	
+	resultChan := make(chan verificationResult, len(keys))
+	var wg sync.WaitGroup
+	
+	for i, key := range keys {
+		wg.Add(1)
+		go func(index int, publicKey interface{}, sig []byte) {
+			defer wg.Done()
+			
+			select {
+			case <-ctx.Done():
+				resultChan <- verificationResult{valid: false, err: ctx.Err(), index: index}
+				return
+			default:
+			}
+			
+			valid := Verify(publicKey, message, sig)
+			resultChan <- verificationResult{valid: valid, index: index}
+		}(i, key, sigs[i])
 	}
-
-	secondaryValid := Verify(m.SecondaryKey, message, signature.SecondarySignature)
-	if !secondaryValid {
-		return false
+	
+	go func() {
+		wg.Wait()
+		close(resultChan)
+	}()
+	
+	validations := make([]bool, len(keys))
+	
+	for result := range resultChan {
+		if result.err != nil {
+			return false
+		}
+		validations[result.index] = result.valid
 	}
-
-	tertiaryValid := Verify(m.TertiaryKey, message, signature.TertiarySignature)
-	if !tertiaryValid {
-		return false
+	
+	for _, valid := range validations {
+		if !valid {
+			return false
+		}
 	}
-
+	
 	expectedHash := sha256.Sum256(append(append(signature.PrimarySignature, signature.SecondarySignature...), signature.TertiarySignature...))
 	
 	if len(signature.CombinedHash) != len(expectedHash) {
 		return false
 	}
-
+	
 	for i := range expectedHash {
 		if signature.CombinedHash[i] != expectedHash[i] {
 			return false
 		}
 	}
-
+	
 	return true
 }
 
 func generateCombinedKeyID(primary, secondary, tertiary interface{}) ([]byte, error) {
-	primaryBytes, err := MarshalPublicKey(primary)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal primary key: %w", err)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	
+	type marshalResult struct {
+		bytes []byte
+		err   error
+		index int
 	}
-
-	secondaryBytes, err := MarshalPublicKey(secondary)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal secondary key: %w", err)
+	
+	keys := []interface{}{primary, secondary, tertiary}
+	resultChan := make(chan marshalResult, len(keys))
+	var wg sync.WaitGroup
+	
+	for i, key := range keys {
+		wg.Add(1)
+		go func(index int, k interface{}) {
+			defer wg.Done()
+			
+			select {
+			case <-ctx.Done():
+				resultChan <- marshalResult{err: ctx.Err(), index: index}
+				return
+			default:
+			}
+			
+			bytes, err := MarshalPublicKey(k)
+			resultChan <- marshalResult{bytes: bytes, err: err, index: index}
+		}(i, key)
 	}
-
-	tertiaryBytes, err := MarshalPublicKey(tertiary)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal tertiary key: %w", err)
+	
+	go func() {
+		wg.Wait()
+		close(resultChan)
+	}()
+	
+	keyBytes := make([][]byte, len(keys))
+	
+	for result := range resultChan {
+		if result.err != nil {
+			return nil, fmt.Errorf("failed to marshal key %d: %w", result.index, result.err)
+		}
+		keyBytes[result.index] = result.bytes
 	}
-
-	combined := append(append(primaryBytes, secondaryBytes...), tertiaryBytes...)
+	
+	combined := append(append(keyBytes[0], keyBytes[1]...), keyBytes[2]...)
 	hash := sha256.Sum256(combined)
 	return hash[:20], nil
 }
 
 func MarshalMultiPQCPrivateKey(key *MultiPQCPrivateKey) ([]byte, error) {
-	primaryBytes, err := MarshalPrivateKey(key.PrimaryKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal primary private key: %w", err)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	
+	type marshalResult struct {
+		bytes []byte
+		err   error
+		index int
 	}
-
-	secondaryBytes, err := MarshalPrivateKey(key.SecondaryKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal secondary private key: %w", err)
+	
+	keys := []interface{}{key.PrimaryKey, key.SecondaryKey, key.TertiaryKey}
+	resultChan := make(chan marshalResult, len(keys))
+	var wg sync.WaitGroup
+	
+	for i, k := range keys {
+		wg.Add(1)
+		go func(index int, privateKey interface{}) {
+			defer wg.Done()
+			
+			select {
+			case <-ctx.Done():
+				resultChan <- marshalResult{err: ctx.Err(), index: index}
+				return
+			default:
+			}
+			
+			bytes, err := MarshalPrivateKey(privateKey)
+			resultChan <- marshalResult{bytes: bytes, err: err, index: index}
+		}(i, k)
 	}
-
-	tertiaryBytes, err := MarshalPrivateKey(key.TertiaryKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal tertiary private key: %w", err)
+	
+	go func() {
+		wg.Wait()
+		close(resultChan)
+	}()
+	
+	keyData := make([][]byte, len(keys))
+	
+	for result := range resultChan {
+		if result.err != nil {
+			return nil, fmt.Errorf("failed to marshal private key %d: %w", result.index, result.err)
+		}
+		keyData[result.index] = result.bytes
 	}
-
+	
 	keyInfo := MultiPQCKeyInfo{
 		Algorithms: []string{key.PrimaryAlgorithm, key.SecondaryAlgorithm, key.TertiaryAlgorithm},
-		KeyData:    [][]byte{primaryBytes, secondaryBytes, tertiaryBytes},
+		KeyData:    keyData,
 		CombinedID: key.CombinedKeyID,
 	}
-
+	
 	return asn1.Marshal(keyInfo)
 }
 
 func MarshalMultiPQCPublicKey(key *MultiPQCPublicKey) ([]byte, error) {
-	primaryBytes, err := MarshalPublicKey(key.PrimaryKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal primary public key: %w", err)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	
+	type marshalResult struct {
+		bytes []byte
+		err   error
+		index int
 	}
-
-	secondaryBytes, err := MarshalPublicKey(key.SecondaryKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal secondary public key: %w", err)
+	
+	keys := []interface{}{key.PrimaryKey, key.SecondaryKey, key.TertiaryKey}
+	resultChan := make(chan marshalResult, len(keys))
+	var wg sync.WaitGroup
+	
+	for i, k := range keys {
+		wg.Add(1)
+		go func(index int, publicKey interface{}) {
+			defer wg.Done()
+			
+			select {
+			case <-ctx.Done():
+				resultChan <- marshalResult{err: ctx.Err(), index: index}
+				return
+			default:
+			}
+			
+			bytes, err := MarshalPublicKey(publicKey)
+			resultChan <- marshalResult{bytes: bytes, err: err, index: index}
+		}(i, k)
 	}
-
-	tertiaryBytes, err := MarshalPublicKey(key.TertiaryKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal tertiary public key: %w", err)
+	
+	go func() {
+		wg.Wait()
+		close(resultChan)
+	}()
+	
+	keyData := make([][]byte, len(keys))
+	
+	for result := range resultChan {
+		if result.err != nil {
+			return nil, fmt.Errorf("failed to marshal public key %d: %w", result.index, result.err)
+		}
+		keyData[result.index] = result.bytes
 	}
-
+	
 	keyInfo := MultiPQCKeyInfo{
 		Algorithms: []string{key.PrimaryAlgorithm, key.SecondaryAlgorithm, key.TertiaryAlgorithm},
-		KeyData:    [][]byte{primaryBytes, secondaryBytes, tertiaryBytes},
+		KeyData:    keyData,
 		CombinedID: key.CombinedKeyID,
 	}
-
+	
 	return asn1.Marshal(keyInfo)
 }
 
@@ -283,33 +512,61 @@ func ParseMultiPQCPrivateKey(data []byte) (*MultiPQCPrivateKey, error) {
 	if _, err := asn1.Unmarshal(data, &keyInfo); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal key info: %w", err)
 	}
-
+	
 	if len(keyInfo.Algorithms) != 3 || len(keyInfo.KeyData) != 3 {
 		return nil, fmt.Errorf("invalid multi-PQC key structure")
 	}
-
-	primaryKey, err := ParsePrivateKey(keyInfo.KeyData[0])
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse primary private key: %w", err)
+	
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	
+	type parseResult struct {
+		key   interface{}
+		err   error
+		index int
 	}
-
-	secondaryKey, err := ParsePrivateKey(keyInfo.KeyData[1])
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse secondary private key: %w", err)
+	
+	resultChan := make(chan parseResult, len(keyInfo.KeyData))
+	var wg sync.WaitGroup
+	
+	for i, keyData := range keyInfo.KeyData {
+		wg.Add(1)
+		go func(index int, data []byte) {
+			defer wg.Done()
+			
+			select {
+			case <-ctx.Done():
+				resultChan <- parseResult{err: ctx.Err(), index: index}
+				return
+			default:
+			}
+			
+			key, err := ParsePrivateKey(data)
+			resultChan <- parseResult{key: key, err: err, index: index}
+		}(i, keyData)
 	}
-
-	tertiaryKey, err := ParsePrivateKey(keyInfo.KeyData[2])
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse tertiary private key: %w", err)
+	
+	go func() {
+		wg.Wait()
+		close(resultChan)
+	}()
+	
+	keys := make([]interface{}, len(keyInfo.KeyData))
+	
+	for result := range resultChan {
+		if result.err != nil {
+			return nil, fmt.Errorf("failed to parse private key %d: %w", result.index, result.err)
+		}
+		keys[result.index] = result.key
 	}
-
+	
 	return &MultiPQCPrivateKey{
 		PrimaryAlgorithm:   keyInfo.Algorithms[0],
 		SecondaryAlgorithm: keyInfo.Algorithms[1],
 		TertiaryAlgorithm:  keyInfo.Algorithms[2],
-		PrimaryKey:         primaryKey,
-		SecondaryKey:       secondaryKey,
-		TertiaryKey:        tertiaryKey,
+		PrimaryKey:         keys[0],
+		SecondaryKey:       keys[1],
+		TertiaryKey:        keys[2],
 		CombinedKeyID:      keyInfo.CombinedID,
 	}, nil
 }
@@ -319,33 +576,69 @@ func ParseMultiPQCPublicKey(data []byte) (*MultiPQCPublicKey, error) {
 	if _, err := asn1.Unmarshal(data, &keyInfo); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal key info: %w", err)
 	}
-
+	
 	if len(keyInfo.Algorithms) != 3 || len(keyInfo.KeyData) != 3 {
 		return nil, fmt.Errorf("invalid multi-PQC key structure")
 	}
-
-	primaryKey, err := ParsePublicKey(keyInfo.KeyData[0])
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse primary public key: %w", err)
+	
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	
+	type parseResult struct {
+		key   interface{}
+		err   error
+		index int
 	}
-
-	secondaryKey, err := ParsePublicKey(keyInfo.KeyData[1])
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse secondary public key: %w", err)
+	
+	resultChan := make(chan parseResult, len(keyInfo.KeyData))
+	var wg sync.WaitGroup
+	
+	for i, keyData := range keyInfo.KeyData {
+		wg.Add(1)
+		go func(index int, data []byte) {
+			defer wg.Done()
+			
+			select {
+			case <-ctx.Done():
+				resultChan <- parseResult{err: ctx.Err(), index: index}
+				return
+			default:
+			}
+			
+			key, err := ParsePublicKey(data)
+			resultChan <- parseResult{key: key, err: err, index: index}
+		}(i, keyData)
 	}
-
-	tertiaryKey, err := ParsePublicKey(keyInfo.KeyData[2])
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse tertiary public key: %w", err)
+	
+	go func() {
+		wg.Wait()
+		close(resultChan)
+	}()
+	
+	keys := make([]interface{}, len(keyInfo.KeyData))
+	
+	for result := range resultChan {
+		if result.err != nil {
+			return nil, fmt.Errorf("failed to parse public key %d: %w", result.index, result.err)
+		}
+		keys[result.index] = result.key
 	}
-
+	
 	return &MultiPQCPublicKey{
 		PrimaryAlgorithm:   keyInfo.Algorithms[0],
 		SecondaryAlgorithm: keyInfo.Algorithms[1],
 		TertiaryAlgorithm:  keyInfo.Algorithms[2],
-		PrimaryKey:         primaryKey,
-		SecondaryKey:       secondaryKey,
-		TertiaryKey:        tertiaryKey,
+		PrimaryKey:         keys[0],
+		SecondaryKey:       keys[1],
+		TertiaryKey:        keys[2],
 		CombinedKeyID:      keyInfo.CombinedID,
 	}, nil
+}
+
+func SetDefaultTimeout(timeout time.Duration) {
+	defaultTimeout = timeout
+}
+
+func GetMaxWorkers() int {
+	return runtime.NumCPU()
 }

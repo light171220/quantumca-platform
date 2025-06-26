@@ -25,6 +25,26 @@ type RateLimiter struct {
 	cleanup  *time.Ticker
 }
 
+type CustomerRateLimiter struct {
+	limiters map[string]*rate.Limiter
+	mu       sync.RWMutex
+	rates    map[int]rate.Limit
+	bursts   map[int]int
+	cleanup  *time.Ticker
+}
+
+type BruteForceProtection struct {
+	attempts map[string]int
+	mu       sync.RWMutex
+	cleanup  *time.Ticker
+}
+
+var (
+	globalRateLimiter    *RateLimiter
+	customerRateLimiter  *CustomerRateLimiter
+	bruteForceProtection *BruteForceProtection
+)
+
 func NewRateLimiter(requestsPerMinute int) *RateLimiter {
 	rl := &RateLimiter{
 		limiters: make(map[string]*rate.Limiter),
@@ -35,6 +55,36 @@ func NewRateLimiter(requestsPerMinute int) *RateLimiter {
 	
 	go rl.cleanupExpiredLimiters()
 	return rl
+}
+
+func NewCustomerRateLimiter() *CustomerRateLimiter {
+	crl := &CustomerRateLimiter{
+		limiters: make(map[string]*rate.Limiter),
+		rates:    make(map[int]rate.Limit),
+		bursts:   make(map[int]int),
+		cleanup:  time.NewTicker(time.Hour),
+	}
+	
+	crl.rates[1] = rate.Every(time.Minute / 60)
+	crl.rates[2] = rate.Every(time.Minute / 120)
+	crl.rates[3] = rate.Every(time.Minute / 300)
+	
+	crl.bursts[1] = 60
+	crl.bursts[2] = 120
+	crl.bursts[3] = 300
+	
+	go crl.cleanupExpiredLimiters()
+	return crl
+}
+
+func NewBruteForceProtection() *BruteForceProtection {
+	bfp := &BruteForceProtection{
+		attempts: make(map[string]int),
+		cleanup:  time.NewTicker(15 * time.Minute),
+	}
+	
+	go bfp.cleanupAttempts()
+	return bfp
 }
 
 func (rl *RateLimiter) getLimiter(key string) *rate.Limiter {
@@ -70,20 +120,118 @@ func (rl *RateLimiter) Stop() {
 	rl.cleanup.Stop()
 }
 
-var globalRateLimiter *RateLimiter
+func (crl *CustomerRateLimiter) getLimiter(key string, tier int) *rate.Limiter {
+	crl.mu.RLock()
+	limiter, exists := crl.limiters[key]
+	crl.mu.RUnlock()
+
+	if !exists {
+		crl.mu.Lock()
+		if limiter, exists = crl.limiters[key]; !exists {
+			tierRate, rateExists := crl.rates[tier]
+			tierBurst, burstExists := crl.bursts[tier]
+			
+			if !rateExists || !burstExists {
+				tierRate = rate.Every(time.Minute / 60)
+				tierBurst = 60
+			}
+			
+			limiter = rate.NewLimiter(tierRate, tierBurst)
+			crl.limiters[key] = limiter
+		}
+		crl.mu.Unlock()
+	}
+
+	return limiter
+}
+
+func (crl *CustomerRateLimiter) cleanupExpiredLimiters() {
+	for range crl.cleanup.C {
+		crl.mu.Lock()
+		for key, limiter := range crl.limiters {
+			if limiter.Tokens() >= float64(limiter.Burst()) {
+				delete(crl.limiters, key)
+			}
+		}
+		crl.mu.Unlock()
+	}
+}
+
+func (crl *CustomerRateLimiter) Stop() {
+	crl.cleanup.Stop()
+}
+
+func (bfp *BruteForceProtection) recordAttempt(ip string) int {
+	bfp.mu.Lock()
+	defer bfp.mu.Unlock()
+	
+	bfp.attempts[ip]++
+	return bfp.attempts[ip]
+}
+
+func (bfp *BruteForceProtection) getAttempts(ip string) int {
+	bfp.mu.RLock()
+	defer bfp.mu.RUnlock()
+	
+	return bfp.attempts[ip]
+}
+
+func (bfp *BruteForceProtection) resetAttempts(ip string) {
+	bfp.mu.Lock()
+	defer bfp.mu.Unlock()
+	
+	delete(bfp.attempts, ip)
+}
+
+func (bfp *BruteForceProtection) cleanupAttempts() {
+	for range bfp.cleanup.C {
+		bfp.mu.Lock()
+		bfp.attempts = make(map[string]int)
+		bfp.mu.Unlock()
+	}
+}
+
+func (bfp *BruteForceProtection) Stop() {
+	bfp.cleanup.Stop()
+}
 
 func InitRateLimiter(requestsPerMinute int) {
 	if globalRateLimiter != nil {
 		globalRateLimiter.Stop()
 	}
 	globalRateLimiter = NewRateLimiter(requestsPerMinute)
+	
+	if customerRateLimiter != nil {
+		customerRateLimiter.Stop()
+	}
+	customerRateLimiter = NewCustomerRateLimiter()
+	
+	if bruteForceProtection != nil {
+		bruteForceProtection.Stop()
+	}
+	bruteForceProtection = NewBruteForceProtection()
 }
 
 func APIKeyAuth(db *sql.DB, logger *utils.Logger) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		clientIP := c.ClientIP()
+		
+		if bruteForceProtection != nil {
+			attempts := bruteForceProtection.getAttempts(clientIP)
+			if attempts >= 10 {
+				logger.LogSecurityEvent("brute_force_blocked", "", clientIP, map[string]interface{}{
+					"attempts": attempts,
+				})
+				c.JSON(http.StatusTooManyRequests, gin.H{"error": "Too many failed attempts"})
+				c.Abort()
+				return
+			}
+		}
+		
 		authHeader := c.GetHeader("Authorization")
 		if authHeader == "" {
-			logger.LogSecurityEvent("missing_auth_header", "", c.ClientIP(), map[string]interface{}{
+			bruteForceProtection.recordAttempt(clientIP)
+			logger.LogSecurityEvent("missing_auth_header", "", clientIP, map[string]interface{}{
 				"endpoint": c.FullPath(),
 				"method":   c.Request.Method,
 			})
@@ -94,7 +242,8 @@ func APIKeyAuth(db *sql.DB, logger *utils.Logger) gin.HandlerFunc {
 
 		parts := strings.SplitN(authHeader, " ", 2)
 		if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
-			logger.LogSecurityEvent("invalid_auth_format", "", c.ClientIP(), map[string]interface{}{
+			bruteForceProtection.recordAttempt(clientIP)
+			logger.LogSecurityEvent("invalid_auth_format", "", clientIP, map[string]interface{}{
 				"header_prefix": authHeader[:min(20, len(authHeader))],
 			})
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid authorization header format"})
@@ -104,7 +253,8 @@ func APIKeyAuth(db *sql.DB, logger *utils.Logger) gin.HandlerFunc {
 
 		apiKey := strings.TrimSpace(parts[1])
 		if len(apiKey) < 32 || len(apiKey) > 128 {
-			logger.LogSecurityEvent("invalid_api_key_length", "", c.ClientIP(), map[string]interface{}{
+			bruteForceProtection.recordAttempt(clientIP)
+			logger.LogSecurityEvent("invalid_api_key_length", "", clientIP, map[string]interface{}{
 				"length": len(apiKey),
 			})
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid API key format"})
@@ -117,14 +267,15 @@ func APIKeyAuth(db *sql.DB, logger *utils.Logger) gin.HandlerFunc {
 
 		customer, err := storage.GetCustomerByAPIKeyWithContext(ctx, db, apiKey)
 		if err != nil {
+			bruteForceProtection.recordAttempt(clientIP)
 			if err == sql.ErrNoRows {
-				logger.LogSecurityEvent("invalid_api_key", "", c.ClientIP(), map[string]interface{}{
+				logger.LogSecurityEvent("invalid_api_key", "", clientIP, map[string]interface{}{
 					"api_key_prefix": utils.HashPrefix(apiKey, 8),
 				})
 				c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid API key"})
 			} else {
 				logger.LogError(err, "Database error during authentication", map[string]interface{}{
-					"ip": c.ClientIP(),
+					"ip": clientIP,
 				})
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "Authentication service unavailable"})
 			}
@@ -133,7 +284,8 @@ func APIKeyAuth(db *sql.DB, logger *utils.Logger) gin.HandlerFunc {
 		}
 
 		if customer.Status != "active" {
-			logger.LogSecurityEvent("inactive_account_access", utils.HashPrefix(customer.APIKey, 8), c.ClientIP(), map[string]interface{}{
+			bruteForceProtection.recordAttempt(clientIP)
+			logger.LogSecurityEvent("inactive_account_access", utils.HashPrefix(customer.APIKey, 8), clientIP, map[string]interface{}{
 				"customer_id": customer.ID,
 				"status":      customer.Status,
 			})
@@ -141,6 +293,8 @@ func APIKeyAuth(db *sql.DB, logger *utils.Logger) gin.HandlerFunc {
 			c.Abort()
 			return
 		}
+		
+		bruteForceProtection.resetAttempts(clientIP)
 
 		c.Set("customer", customer)
 		c.Set("customer_id", customer.ID)
@@ -182,6 +336,15 @@ func JWTAuth(jwtSecret string, logger *utils.Logger) gin.HandlerFunc {
 			c.Abort()
 			return
 		}
+		
+		if time.Now().After(claims.ExpiresAt.Time) {
+			logger.LogSecurityEvent("expired_jwt", "", c.ClientIP(), map[string]interface{}{
+				"expired_at": claims.ExpiresAt.Time,
+			})
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Token expired"})
+			c.Abort()
+			return
+		}
 
 		c.Set("user_id", claims.UserID)
 		c.Set("customer_id", claims.CustomerID)
@@ -198,13 +361,23 @@ func RateLimit(requestsPerMinute int) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		key := c.ClientIP()
 		
+		var limiter *rate.Limiter
+		
 		if customerID, exists := c.Get("customer_id"); exists {
 			if custID, ok := customerID.(int); ok {
-				key = fmt.Sprintf("%s:%d", key, custID)
+				if tier, tierExists := c.Get("tier"); tierExists {
+					if userTier, tierOk := tier.(int); tierOk {
+						key = fmt.Sprintf("%s:%d", key, custID)
+						limiter = customerRateLimiter.getLimiter(key, userTier)
+					}
+				}
 			}
 		}
+		
+		if limiter == nil {
+			limiter = globalRateLimiter.getLimiter(key)
+		}
 
-		limiter := globalRateLimiter.getLimiter(key)
 		if !limiter.Allow() {
 			c.Header("X-RateLimit-Limit", strconv.Itoa(requestsPerMinute))
 			c.Header("X-RateLimit-Remaining", "0")
@@ -258,7 +431,6 @@ func RequireTier(minTier int) gin.HandlerFunc {
 		tier, exists := c.Get("tier")
 		if !exists {
 			c.JSON(http.StatusForbidden, gin.H{"error": "Tier information required"})
-			c.Abort()
 			return
 		}
 

@@ -64,6 +64,22 @@ func (s *Server) Stop() error {
 	return nil
 }
 
+func (s *Server) GetStatistics() map[string]interface{} {
+	if s.responder == nil {
+		return map[string]interface{}{
+			"error": "responder not initialized",
+		}
+	}
+	return s.responder.GetStatistics()
+}
+
+func (s *Server) HealthCheck() error {
+	if s.responder == nil {
+		return fmt.Errorf("responder not initialized")
+	}
+	return s.responder.HealthCheck()
+}
+
 func (s *Server) handleOCSPRequest(w http.ResponseWriter, r *http.Request) {
 	var requestBytes []byte
 	var err error
@@ -124,7 +140,7 @@ func (s *Server) handlePOSTRequest(r *http.Request) ([]byte, error) {
 }
 
 func (s *Server) handleHealthCheck(w http.ResponseWriter, r *http.Request) {
-	if err := s.responder.HealthCheck(); err != nil {
+	if err := s.HealthCheck(); err != nil {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		fmt.Fprintf(w, "Health check failed: %v", err)
 		return
@@ -136,7 +152,7 @@ func (s *Server) handleHealthCheck(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
-	stats := s.responder.GetStatistics()
+	stats := s.GetStatistics()
 	
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)

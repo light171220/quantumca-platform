@@ -25,6 +25,7 @@ type IntermediateCA struct {
 	keyStore    *keymanager.EncryptedKeyStore
 	useMultiPQC bool
 	dummyRSAKey *rsa.PrivateKey
+	Algorithms  []string
 }
 
 func NewIntermediateCA(config *utils.Config, rootCA *RootCA) *IntermediateCA {
@@ -34,6 +35,7 @@ func NewIntermediateCA(config *utils.Config, rootCA *RootCA) *IntermediateCA {
 		rootCA:      rootCA,
 		useMultiPQC: true,
 		dummyRSAKey: dummyKey,
+		Algorithms:  []string{},
 	}
 }
 
@@ -89,12 +91,19 @@ func (i *IntermediateCA) loadExistingCA(keyID string) error {
 			return fmt.Errorf("failed to parse multi-PQC private key: %w", err)
 		}
 		i.useMultiPQC = true
+		i.Algorithms = []string{
+			"multi-pqc",
+			i.multiPQCKey.PrimaryAlgorithm,
+			i.multiPQCKey.SecondaryAlgorithm,
+			i.multiPQCKey.TertiaryAlgorithm,
+		}
 	} else {
 		i.privateKey, err = pq.ParsePrivateKey(keyData)
 		if err != nil {
 			return fmt.Errorf("failed to parse intermediate CA private key: %w", err)
 		}
 		i.useMultiPQC = false
+		i.Algorithms = []string{metadata.Algorithm}
 	}
 
 	certData, err := i.keyStore.LoadCertificate(keyID)
@@ -186,6 +195,12 @@ func (i *IntermediateCA) generateMultiPQCCA() error {
 
 	i.multiPQCKey = multiPQCKey
 	i.useMultiPQC = true
+	i.Algorithms = []string{
+		"multi-pqc",
+		multiPQCKey.PrimaryAlgorithm,
+		multiPQCKey.SecondaryAlgorithm,
+		multiPQCKey.TertiaryAlgorithm,
+	}
 
 	i.secureZero(multiPQCPrivateKeyDER)
 
@@ -252,6 +267,7 @@ func (i *IntermediateCA) generateSinglePQCCA() error {
 
 	i.privateKey = privateKey
 	i.useMultiPQC = false
+	i.Algorithms = []string{"dilithium5"}
 
 	i.secureZero(privateKeyDER)
 
@@ -539,18 +555,6 @@ func (i *IntermediateCA) GetCertificateInfo() map[string]interface{} {
 		}
 	}
 
-	var algorithms []string
-	if i.useMultiPQC && i.multiPQCKey != nil {
-		algorithms = []string{
-			"multi-pqc",
-			i.multiPQCKey.PrimaryAlgorithm,
-			i.multiPQCKey.SecondaryAlgorithm,
-			i.multiPQCKey.TertiaryAlgorithm,
-		}
-	} else {
-		algorithms = []string{"dilithium5"}
-	}
-
 	return map[string]interface{}{
 		"subject":       i.certificate.Subject.String(),
 		"issuer":        i.certificate.Issuer.String(),
@@ -560,7 +564,7 @@ func (i *IntermediateCA) GetCertificateInfo() map[string]interface{} {
 		"is_ca":         i.certificate.IsCA,
 		"max_path_len":  i.certificate.MaxPathLen,
 		"key_usage":     i.certificate.KeyUsage,
-		"algorithms":    algorithms,
+		"algorithms":    i.Algorithms,
 		"multi_pqc":     i.useMultiPQC,
 	}
 }

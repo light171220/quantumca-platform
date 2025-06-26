@@ -255,23 +255,28 @@ func (ms *MetricsService) collectDatabaseMetrics() {
 	ms.dbConnections.Set(float64(stats.OpenConnections))
 }
 
-func (ms *MetricsService) RecordCertificateIssued(customerTier int) {
+func (ms *MetricsService) RecordBatchOperation(operation string, successful, failed int) error {
+	ms.logger.Infof("Batch operation %s: %d successful, %d failed", operation, successful, failed)
+	return nil
+}
+
+func (ms *MetricsService) RecordCertificateIssued(tier int) {
 	ms.certificatesTotal.WithLabelValues(
-		fmt.Sprintf("tier_%d", customerTier),
+		fmt.Sprintf("tier_%d", tier),
 		"issued",
 	).Inc()
 }
 
-func (ms *MetricsService) RecordCertificateRevoked(customerTier int) {
+func (ms *MetricsService) RecordCertificateRevoked(tier int) {
 	ms.certificatesTotal.WithLabelValues(
-		fmt.Sprintf("tier_%d", customerTier),
+		fmt.Sprintf("tier_%d", tier),
 		"revoked",
 	).Inc()
 }
 
-func (ms *MetricsService) RecordIntermediateCACreated(customerTier int) {
+func (ms *MetricsService) RecordIntermediateCACreated(tier int) {
 	ms.intermediateCAsTotal.WithLabelValues(
-		fmt.Sprintf("tier_%d", customerTier),
+		fmt.Sprintf("tier_%d", tier),
 		"created",
 	).Inc()
 }

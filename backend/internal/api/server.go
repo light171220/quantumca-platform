@@ -134,6 +134,16 @@ func (s *Server) setupAPIRoutes() {
 	customerHandler := handlers.NewCustomerHandler(s.db, s.config, s.logger, s.metricsService)
 	api.POST("/customers", customerHandler.Create)
 	
+	caInfoHandler := handlers.NewCAInfoHandler(s.config, s.logger)
+	api.GET("/ca/root/info", caInfoHandler.GetRootCAInfo)
+	api.GET("/ca/intermediate/info", caInfoHandler.GetIntermediateCAInfo)
+	api.GET("/ca/chain", caInfoHandler.GetCertificateChain)
+	api.GET("/ca/algorithms", caInfoHandler.GetSupportedAlgorithms)
+	
+	crlHandler := handlers.NewCRLHandler(s.db, s.config, s.logger)
+	api.GET("/crl", crlHandler.DownloadCRL)
+	api.GET("/crl/info", crlHandler.GetCRLInfo)
+	
 	protected := api.Group("")
 	protected.Use(middleware.APIKeyAuth(s.db, s.logger))
 	{
@@ -154,10 +164,37 @@ func (s *Server) setupAPIRoutes() {
 		protected.POST("/certificates/:id/renew", certHandler.Renew)
 		protected.GET("/certificates/:id/download", certHandler.Download)
 
-		intermediateHandler := handlers.NewIntermediateHandler(s.db, s.config, s.logger, s.metricsService)
+		batchHandler := handlers.NewBatchHandler(s.db, s.config, s.logger, s.metricsService)
+		protected.POST("/certificates/batch", batchHandler.BatchIssueCertificates)
+		protected.POST("/certificates/batch-revoke", batchHandler.BatchRevokeCertificates)
+		protected.GET("/certificates/expiring", batchHandler.GetExpiringCertificates)
+		protected.POST("/certificates/bulk-export", batchHandler.BulkExportCertificates)
+
+		exportHandler := handlers.NewExportHandler(s.db, s.config, s.logger)
+		protected.GET("/certificates/:id/chain", exportHandler.GetCertificateChain)
+		protected.GET("/certificates/:id/pkcs12", exportHandler.ExportPKCS12)
+		protected.POST("/certificates/:id/formats", exportHandler.ExportMultipleFormats)
+
+		ocspAPIHandler := handlers.NewOCSPAPIHandler(s.db, s.config, s.logger, s.ocspServer)
+		protected.GET("/ocsp/status/:serial", ocspAPIHandler.CheckCertificateStatus)
+		protected.POST("/certificates/batch-ocsp-check", ocspAPIHandler.BatchCheckStatus)
+		protected.GET("/ocsp/responder/health", ocspAPIHandler.GetOCSPHealth)
+		protected.GET("/ocsp/responder/stats", ocspAPIHandler.GetOCSPStats)
+		protected.GET("/ocsp/responder/config", ocspAPIHandler.GetOCSPConfig)
+
+		analyticsHandler := handlers.NewAnalyticsHandler(s.db, s.config, s.logger, s.metricsService)
+		protected.GET("/analytics/dashboard", analyticsHandler.GetDashboard)
+		protected.GET("/analytics/expiration-report", analyticsHandler.GetExpirationReport)
+		protected.GET("/analytics/algorithm-usage", analyticsHandler.GetAlgorithmUsage)
+		protected.GET("/analytics/revocation-stats", analyticsHandler.GetRevocationStats)
+
 		tier2Required := protected.Group("")
 		tier2Required.Use(middleware.RequireTier(2))
 		{
+			tier2Required.POST("/crl/generate", crlHandler.GenerateCRL)
+
+			intermediateHandler := handlers.NewIntermediateHandler(s.db, s.config, s.logger, s.metricsService)
+			tier2Required.POST("/ca/intermediate", intermediateHandler.Create)
 			tier2Required.POST("/intermediate-ca", intermediateHandler.Create)
 			tier2Required.GET("/intermediate-ca", intermediateHandler.List)
 			tier2Required.GET("/intermediate-ca/:id", intermediateHandler.Get)

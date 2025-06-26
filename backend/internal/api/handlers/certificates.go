@@ -82,7 +82,7 @@ func NewCertificateHandler(db *sql.DB, config *utils.Config, logger *utils.Logge
 }
 
 func (h *CertificateHandler) Issue(c *gin.Context) {
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 60*time.Second)
 	defer cancel()
 
 	var req IssueCertRequest
@@ -106,6 +106,25 @@ func (h *CertificateHandler) Issue(c *gin.Context) {
 		return
 	}
 
+	tx, err := h.db.BeginTx(ctx, nil)
+	if err != nil {
+		h.logger.LogError(err, "Failed to begin transaction", map[string]interface{}{
+			"customer_id": custID,
+		})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database transaction error"})
+		return
+	}
+	defer tx.Rollback()
+
+	customer, err := storage.GetCustomerWithContextTx(ctx, tx, custID)
+	if err != nil {
+		h.logger.LogError(err, "Failed to get customer", map[string]interface{}{
+			"customer_id": custID,
+		})
+		c.JSON(http.StatusNotFound, gin.H{"error": "Customer not found"})
+		return
+	}
+
 	template, err := h.getAndValidateTemplate(ctx, req.TemplateID)
 	if err != nil {
 		h.logger.LogError(err, "Template validation failed", map[string]interface{}{
@@ -125,16 +144,7 @@ func (h *CertificateHandler) Issue(c *gin.Context) {
 		return
 	}
 
-	customer, err := storage.GetCustomerWithContext(ctx, h.db, custID)
-	if err != nil {
-		h.logger.LogError(err, "Failed to get customer", map[string]interface{}{
-			"customer_id": custID,
-		})
-		c.JSON(http.StatusNotFound, gin.H{"error": "Customer not found"})
-		return
-	}
-
-	if err := h.checkCertificateQuota(ctx, custID); err != nil {
+	if err := h.checkCertificateQuotaWithTx(ctx, tx, custID); err != nil {
 		h.logger.LogError(err, "Certificate quota exceeded", map[string]interface{}{
 			"customer_id": custID,
 		})
@@ -166,32 +176,22 @@ func (h *CertificateHandler) Issue(c *gin.Context) {
 		return
 	}
 
-	certID, err := storage.CreateCertificateWithContext(ctx, h.db, &storage.Certificate{
-		CustomerID:           custID,
-		SerialNumber:         cert.SerialNumber,
-		CommonName:           utils.SanitizeString(req.CommonName),
-		SubjectAltNames:      h.sanitizeSubjectAltNames(req.SubjectAltNames),
-		CertificatePEM:       cert.CertificatePEM,
-		PrivateKeyPEM:        cert.PrivateKeyPEM,
-		Algorithms:           cert.Algorithms,
-		IsMultiPQC:          cert.IsMultiPQC,
-		HasKEM:              cert.HasKEM,
-		MultiPQCCertificates: cert.MultiPQCCertificates,
-		MultiPQCPrivateKeys:  cert.MultiPQCPrivateKeys,
-		KEMPublicKeyPEM:     cert.KEMPublicKeyPEM,
-		KEMPrivateKeyPEM:    cert.KEMPrivateKeyPEM,
-		Fingerprint:         cert.Fingerprint,
-		KeyID:               cert.KeyID,
-		NotBefore:           cert.NotBefore,
-		NotAfter:            cert.NotAfter,
-		Status:              "active",
-	})
+	certID, err := h.storeCertificateWithTx(ctx, tx, custID, &req, cert)
 	if err != nil {
 		h.logger.LogError(err, "Failed to store certificate", map[string]interface{}{
 			"customer_id":   custID,
 			"serial_number": cert.SerialNumber,
 		})
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to store certificate"})
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		h.logger.LogError(err, "Failed to commit transaction", map[string]interface{}{
+			"customer_id":   custID,
+			"certificate_id": certID,
+		})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to complete certificate issuance"})
 		return
 	}
 
@@ -329,7 +329,7 @@ func (h *CertificateHandler) Get(c *gin.Context) {
 }
 
 func (h *CertificateHandler) Revoke(c *gin.Context) {
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
 	defer cancel()
 
 	idStr := c.Param("id")
@@ -351,7 +351,18 @@ func (h *CertificateHandler) Revoke(c *gin.Context) {
 		return
 	}
 
-	cert, err := storage.GetCertificateWithContext(ctx, h.db, id)
+	tx, err := h.db.BeginTx(ctx, nil)
+	if err != nil {
+		h.logger.LogError(err, "Failed to begin transaction", map[string]interface{}{
+			"certificate_id": id,
+			"customer_id":    custID,
+		})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database transaction error"})
+		return
+	}
+	defer tx.Rollback()
+
+	cert, err := storage.GetCertificateWithContextTx(ctx, tx, id)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Certificate not found"})
@@ -371,11 +382,19 @@ func (h *CertificateHandler) Revoke(c *gin.Context) {
 		return
 	}
 
-	if err := storage.RevokeCertificateWithContext(ctx, h.db, id); err != nil {
+	if err := storage.RevokeCertificateWithContextTx(ctx, tx, id); err != nil {
 		h.logger.LogError(err, "Failed to revoke certificate", map[string]interface{}{
 			"certificate_id": id,
 		})
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to revoke certificate"})
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		h.logger.LogError(err, "Failed to commit revocation", map[string]interface{}{
+			"certificate_id": id,
+		})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to complete certificate revocation"})
 		return
 	}
 
@@ -469,7 +488,7 @@ func (h *CertificateHandler) Download(c *gin.Context) {
 }
 
 func (h *CertificateHandler) Renew(c *gin.Context) {
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 60*time.Second)
 	defer cancel()
 
 	idStr := c.Param("id")
@@ -491,7 +510,18 @@ func (h *CertificateHandler) Renew(c *gin.Context) {
 		return
 	}
 
-	cert, err := storage.GetCertificateWithContext(ctx, h.db, id)
+	tx, err := h.db.BeginTx(ctx, nil)
+	if err != nil {
+		h.logger.LogError(err, "Failed to begin transaction", map[string]interface{}{
+			"certificate_id": id,
+			"customer_id":    custID,
+		})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database transaction error"})
+		return
+	}
+	defer tx.Rollback()
+
+	cert, err := storage.GetCertificateWithContextTx(ctx, tx, id)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Certificate not found"})
@@ -519,7 +549,7 @@ func (h *CertificateHandler) Renew(c *gin.Context) {
 		return
 	}
 
-	customer, err := storage.GetCustomerWithContext(ctx, h.db, cert.CustomerID)
+	customer, err := storage.GetCustomerWithContextTx(ctx, tx, cert.CustomerID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get customer"})
 		return
@@ -547,7 +577,7 @@ func (h *CertificateHandler) Renew(c *gin.Context) {
 		return
 	}
 
-	newCertID, err := storage.CreateCertificateWithContext(ctx, h.db, &storage.Certificate{
+	newCertID, err := storage.CreateCertificateWithContextTx(ctx, tx, &storage.Certificate{
 		CustomerID:           cert.CustomerID,
 		SerialNumber:         newCert.SerialNumber,
 		CommonName:           cert.CommonName,
@@ -576,10 +606,19 @@ func (h *CertificateHandler) Renew(c *gin.Context) {
 		return
 	}
 
-	if err := storage.RevokeCertificateWithContext(ctx, h.db, id); err != nil {
+	if err := storage.RevokeCertificateWithContextTx(ctx, tx, id); err != nil {
 		h.logger.LogError(err, "Failed to revoke original certificate during renewal", map[string]interface{}{
 			"certificate_id": id,
 		})
+	}
+
+	if err := tx.Commit(); err != nil {
+		h.logger.LogError(err, "Failed to commit renewal transaction", map[string]interface{}{
+			"original_cert_id": id,
+			"new_cert_id":      newCertID,
+		})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to complete certificate renewal"})
+		return
 	}
 
 	h.logger.LogCertificateEvent("certificate_renewed", fmt.Sprintf("%d", newCertID), cert.CustomerID, map[string]interface{}{
@@ -633,19 +672,19 @@ func (h *CertificateHandler) getAndValidateTemplate(ctx context.Context, templat
 		return nil, fmt.Errorf("failed to get template: %w", err)
 	}
 
-	if keyUsagesJSON.Valid {
+	if keyUsagesJSON.Valid && keyUsagesJSON.String != "" {
 		if err := storage.UnmarshalJSON([]byte(keyUsagesJSON.String), &template.KeyUsages); err != nil {
 			template.KeyUsages = []string{}
 		}
 	}
 
-	if extKeyUsagesJSON.Valid {
+	if extKeyUsagesJSON.Valid && extKeyUsagesJSON.String != "" {
 		if err := storage.UnmarshalJSON([]byte(extKeyUsagesJSON.String), &template.ExtKeyUsages); err != nil {
 			template.ExtKeyUsages = []string{}
 		}
 	}
 
-	if policiesJSON.Valid {
+	if policiesJSON.Valid && policiesJSON.String != "" {
 		if err := storage.UnmarshalJSON([]byte(policiesJSON.String), &template.Policies); err != nil {
 			template.Policies = make(map[string]interface{})
 		}
@@ -758,6 +797,72 @@ func (h *CertificateHandler) checkCertificateQuota(ctx context.Context, customer
 	return nil
 }
 
+func (h *CertificateHandler) checkCertificateQuotaWithTx(ctx context.Context, tx *sql.Tx, customerID int) error {
+	query := `SELECT COUNT(*) FROM certificates WHERE customer_id = ? AND status = 'active' FOR UPDATE`
+	
+	var count int
+	err := tx.QueryRowContext(ctx, query, customerID).Scan(&count)
+	if err != nil {
+		return fmt.Errorf("failed to check certificate quota: %w", err)
+	}
+
+	if count >= h.config.MaxCertificatesPerCustomer {
+		return fmt.Errorf("certificate quota exceeded (%d/%d)", count, h.config.MaxCertificatesPerCustomer)
+	}
+
+	return nil
+}
+
+func (h *CertificateHandler) storeCertificate(ctx context.Context, customerID int, req *IssueCertRequest, cert *ca.CertificateResponse) (int, error) {
+	dbCert := &storage.Certificate{
+		CustomerID:           customerID,
+		SerialNumber:         cert.SerialNumber,
+		CommonName:           utils.SanitizeString(req.CommonName),
+		SubjectAltNames:      h.sanitizeSubjectAltNames(req.SubjectAltNames),
+		CertificatePEM:       cert.CertificatePEM,
+		PrivateKeyPEM:        cert.PrivateKeyPEM,
+		Algorithms:           cert.Algorithms,
+		IsMultiPQC:          cert.IsMultiPQC,
+		HasKEM:              cert.HasKEM,
+		MultiPQCCertificates: cert.MultiPQCCertificates,
+		MultiPQCPrivateKeys:  cert.MultiPQCPrivateKeys,
+		KEMPublicKeyPEM:     cert.KEMPublicKeyPEM,
+		KEMPrivateKeyPEM:    cert.KEMPrivateKeyPEM,
+		Fingerprint:         cert.Fingerprint,
+		KeyID:               cert.KeyID,
+		NotBefore:           cert.NotBefore,
+		NotAfter:            cert.NotAfter,
+		Status:              "active",
+	}
+	
+	return storage.CreateCertificateWithContext(ctx, h.db, dbCert)
+}
+
+func (h *CertificateHandler) storeCertificateWithTx(ctx context.Context, tx *sql.Tx, customerID int, req *IssueCertRequest, cert *ca.CertificateResponse) (int, error) {
+	dbCert := &storage.Certificate{
+		CustomerID:           customerID,
+		SerialNumber:         cert.SerialNumber,
+		CommonName:           utils.SanitizeString(req.CommonName),
+		SubjectAltNames:      h.sanitizeSubjectAltNames(req.SubjectAltNames),
+		CertificatePEM:       cert.CertificatePEM,
+		PrivateKeyPEM:        cert.PrivateKeyPEM,
+		Algorithms:           cert.Algorithms,
+		IsMultiPQC:          cert.IsMultiPQC,
+		HasKEM:              cert.HasKEM,
+		MultiPQCCertificates: cert.MultiPQCCertificates,
+		MultiPQCPrivateKeys:  cert.MultiPQCPrivateKeys,
+		KEMPublicKeyPEM:     cert.KEMPublicKeyPEM,
+		KEMPrivateKeyPEM:    cert.KEMPrivateKeyPEM,
+		Fingerprint:         cert.Fingerprint,
+		KeyID:               cert.KeyID,
+		NotBefore:           cert.NotBefore,
+		NotAfter:            cert.NotAfter,
+		Status:              "active",
+	}
+	
+	return storage.CreateCertificateWithContextTx(ctx, tx, dbCert)
+}
+
 func (h *CertificateHandler) logCertificateEvent(event string, certID int, custID int, req *IssueCertRequest, cert *ca.CertificateResponse) {
 	h.logger.LogCertificateEvent(event, fmt.Sprintf("%d", certID), custID, map[string]interface{}{
 		"common_name":    req.CommonName,
@@ -820,12 +925,16 @@ func (h *CertificateHandler) getCertificatesPaginated(ctx context.Context, custo
 			continue
 		}
 
-		if err := storage.UnmarshalJSON([]byte(algorithmsJSON), &cert.Algorithms); err != nil {
-			cert.Algorithms = []string{}
+		if algorithmsJSON != "" {
+			if err := storage.UnmarshalJSON([]byte(algorithmsJSON), &cert.Algorithms); err != nil {
+				cert.Algorithms = []string{}
+			}
 		}
 
-		if err := storage.UnmarshalJSON([]byte(subjectAltNamesJSON), &cert.SubjectAltNames); err != nil {
-			cert.SubjectAltNames = []string{}
+		if subjectAltNamesJSON != "" {
+			if err := storage.UnmarshalJSON([]byte(subjectAltNamesJSON), &cert.SubjectAltNames); err != nil {
+				cert.SubjectAltNames = []string{}
+			}
 		}
 
 		cert.NotBefore = notBefore.Format(time.RFC3339)

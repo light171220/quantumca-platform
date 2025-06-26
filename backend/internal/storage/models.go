@@ -58,7 +58,7 @@ type IntermediateCA struct {
 	CustomerID           int       `json:"customer_id"`
 	CommonName           string    `json:"common_name"`
 	SerialNumber         string    `json:"serial_number"`
-	Algorithm            string    `json:"algorithm"`
+	Algorithms           []string  `json:"algorithms"`
 	IsMultiPQC          bool      `json:"is_multi_pqc"`
 	HasKEM              bool      `json:"has_kem"`
 	CertificatePEM       string    `json:"certificate_pem"`

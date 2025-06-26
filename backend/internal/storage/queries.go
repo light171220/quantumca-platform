@@ -205,6 +205,26 @@ func GetCustomerWithContext(ctx context.Context, db *sql.DB, id int) (*Customer,
 	return &customer, nil
 }
 
+func GetCustomerWithContextTx(ctx context.Context, tx *sql.Tx, id int) (*Customer, error) {
+	if id <= 0 {
+		return nil, fmt.Errorf("invalid customer ID")
+	}
+
+	var customer Customer
+	err := tx.QueryRowContext(ctx, getCustomerQuery, id).Scan(
+		&customer.ID, &customer.CompanyName, &customer.Email, &customer.APIKey, 
+		&customer.Tier, &customer.Status, &customer.CreatedAt, &customer.UpdatedAt)
+	
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("customer not found")
+		}
+		return nil, fmt.Errorf("failed to get customer: %w", err)
+	}
+
+	return &customer, nil
+}
+
 func GetCustomerByAPIKey(db *sql.DB, apiKey string) (*Customer, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -478,6 +498,76 @@ func CreateCertificateWithContext(ctx context.Context, db *sql.DB, cert *Certifi
 	return int(id), nil
 }
 
+func CreateCertificateWithContextTx(ctx context.Context, tx *sql.Tx, cert *Certificate) (int, error) {
+	if err := validateCertificateInput(cert); err != nil {
+		return 0, fmt.Errorf("invalid certificate data: %w", err)
+	}
+
+	var count int
+	countQuery := `SELECT COUNT(*) FROM certificates WHERE customer_id = ? AND status = 'active' FOR UPDATE`
+	err := tx.QueryRowContext(ctx, countQuery, cert.CustomerID).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("failed to check certificate quota: %w", err)
+	}
+
+	if count >= 1000 {
+		return 0, fmt.Errorf("certificate quota exceeded")
+	}
+
+	subjectAltNamesJSON, err := json.Marshal(cert.SubjectAltNames)
+	if err != nil {
+		return 0, fmt.Errorf("failed to marshal subject alt names: %w", err)
+	}
+
+	algorithmsJSON, err := json.Marshal(cert.Algorithms)
+	if err != nil {
+		return 0, fmt.Errorf("failed to marshal algorithms: %w", err)
+	}
+
+	multiPQCCertsJSON, err := json.Marshal(cert.MultiPQCCertificates)
+	if err != nil {
+		return 0, fmt.Errorf("failed to marshal multi-PQC certificates: %w", err)
+	}
+
+	multiPQCKeysJSON, err := json.Marshal(cert.MultiPQCPrivateKeys)
+	if err != nil {
+		return 0, fmt.Errorf("failed to marshal multi-PQC private keys: %w", err)
+	}
+	
+	result, err := tx.ExecContext(ctx, createCertificateQuery, 
+		cert.CustomerID, 
+		sanitizeString(cert.SerialNumber), 
+		sanitizeString(cert.CommonName), 
+		string(subjectAltNamesJSON), 
+		cert.CertificatePEM, 
+		cert.PrivateKeyPEM, 
+		string(algorithmsJSON),
+		cert.IsMultiPQC,
+		cert.HasKEM,
+		string(multiPQCCertsJSON),
+		string(multiPQCKeysJSON),
+		cert.KEMPublicKeyPEM,
+		cert.KEMPrivateKeyPEM,
+		cert.Fingerprint,
+		cert.KeyID,
+		cert.NotBefore, 
+		cert.NotAfter, 
+		cert.Status)
+	if err != nil {
+		return 0, fmt.Errorf("failed to create certificate: %w", err)
+	}
+
+	id, err := result.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("failed to get certificate ID: %w", err)
+	}
+
+	cert.ID = int(id)
+	cert.CreatedAt = time.Now()
+
+	return int(id), nil
+}
+
 func GetCertificate(db *sql.DB, id int) (*Certificate, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -537,7 +627,6 @@ func GetCertificate(db *sql.DB, id int) (*Certificate, error) {
 	return &cert, nil
 }
 
-// GetCertificateBySerial - This is the missing function that was causing the error
 func GetCertificateBySerial(db *sql.DB, serialNumber string) (*Certificate, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -653,6 +742,131 @@ func GetCertificateWithContext(ctx context.Context, db *sql.DB, id int) (*Certif
 	return &cert, nil
 }
 
+func GetCertificateWithContextTx(ctx context.Context, tx *sql.Tx, id int) (*Certificate, error) {
+	if id <= 0 {
+		return nil, fmt.Errorf("invalid certificate ID")
+	}
+
+	var cert Certificate
+	var subjectAltNamesJSON, algorithmsJSON, multiPQCCertsJSON, multiPQCKeysJSON string
+	var revokedAt sql.NullTime
+	var revocationReason sql.NullString
+	
+	err := tx.QueryRowContext(ctx, getCertificateQuery, id).Scan(
+		&cert.ID, &cert.CustomerID, &cert.SerialNumber, &cert.CommonName, 
+		&subjectAltNamesJSON, &cert.CertificatePEM, &cert.PrivateKeyPEM, 
+		&algorithmsJSON, &cert.IsMultiPQC, &cert.HasKEM,
+		&multiPQCCertsJSON, &multiPQCKeysJSON, &cert.KEMPublicKeyPEM, &cert.KEMPrivateKeyPEM,
+		&cert.Fingerprint, &cert.KeyID, &cert.NotBefore, &cert.NotAfter, &cert.Status, 
+		&cert.CreatedAt, &cert.UpdatedAt, &cert.LastAlertSent, &revokedAt, &revocationReason)
+	
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("certificate not found")
+		}
+		return nil, fmt.Errorf("failed to get certificate: %w", err)
+	}
+
+	if err = json.Unmarshal([]byte(subjectAltNamesJSON), &cert.SubjectAltNames); err != nil {
+		cert.SubjectAltNames = []string{}
+	}
+
+	if err = json.Unmarshal([]byte(algorithmsJSON), &cert.Algorithms); err != nil {
+		cert.Algorithms = []string{}
+	}
+
+	if cert.IsMultiPQC && multiPQCCertsJSON != "" {
+		if err = json.Unmarshal([]byte(multiPQCCertsJSON), &cert.MultiPQCCertificates); err != nil {
+			cert.MultiPQCCertificates = []string{}
+		}
+	}
+
+	if cert.IsMultiPQC && multiPQCKeysJSON != "" {
+		if err = json.Unmarshal([]byte(multiPQCKeysJSON), &cert.MultiPQCPrivateKeys); err != nil {
+			cert.MultiPQCPrivateKeys = []string{}
+		}
+	}
+	
+	if revokedAt.Valid {
+		cert.RevokedAt = &revokedAt.Time
+	}
+	
+	if revocationReason.Valid {
+		cert.RevocationReason = revocationReason.String
+	}
+
+	return &cert, nil
+}
+
+func GetCustomerCertificates(db *sql.DB, customerID int) ([]*Certificate, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if customerID <= 0 {
+		return nil, fmt.Errorf("invalid customer ID")
+	}
+
+	rows, err := db.QueryContext(ctx, getCustomerCertificatesQuery, customerID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get customer certificates: %w", err)
+	}
+	defer rows.Close()
+
+	var certificates []*Certificate
+	for rows.Next() {
+		var cert Certificate
+		var subjectAltNamesJSON, algorithmsJSON, multiPQCCertsJSON, multiPQCKeysJSON string
+		var revokedAt sql.NullTime
+		var revocationReason sql.NullString
+		
+		err := rows.Scan(&cert.ID, &cert.CustomerID, &cert.SerialNumber, &cert.CommonName, 
+			&subjectAltNamesJSON, &cert.CertificatePEM, &cert.PrivateKeyPEM, 
+			&algorithmsJSON, &cert.IsMultiPQC, &cert.HasKEM,
+			&multiPQCCertsJSON, &multiPQCKeysJSON, &cert.KEMPublicKeyPEM, &cert.KEMPrivateKeyPEM,
+			&cert.Fingerprint, &cert.KeyID, &cert.NotBefore, &cert.NotAfter, &cert.Status, 
+			&cert.CreatedAt, &cert.UpdatedAt, &cert.LastAlertSent, &revokedAt, &revocationReason)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan certificate: %w", err)
+		}
+
+		if err = json.Unmarshal([]byte(subjectAltNamesJSON), &cert.SubjectAltNames); err != nil {
+			cert.SubjectAltNames = []string{}
+		}
+
+		if err = json.Unmarshal([]byte(algorithmsJSON), &cert.Algorithms); err != nil {
+			cert.Algorithms = []string{}
+		}
+
+		if cert.IsMultiPQC && multiPQCCertsJSON != "" {
+			if err = json.Unmarshal([]byte(multiPQCCertsJSON), &cert.MultiPQCCertificates); err != nil {
+				cert.MultiPQCCertificates = []string{}
+			}
+		}
+
+		if cert.IsMultiPQC && multiPQCKeysJSON != "" {
+			if err = json.Unmarshal([]byte(multiPQCKeysJSON), &cert.MultiPQCPrivateKeys); err != nil {
+				cert.MultiPQCPrivateKeys = []string{}
+			}
+		}
+		
+		if revokedAt.Valid {
+			cert.RevokedAt = &revokedAt.Time
+		}
+		
+		if revocationReason.Valid {
+			cert.RevocationReason = revocationReason.String
+		}
+
+		certificates = append(certificates, &cert)
+	}
+
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("row iteration error: %w", err)
+	}
+
+	return certificates, nil
+}
+
 func CreateDomain(db *sql.DB, domain *Domain) (int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -716,6 +930,12 @@ func GetDomain(db *sql.DB, id int) (*Domain, error) {
 	}
 
 	return &domain, nil
+}
+
+func GetCustomerDomains(db *sql.DB, customerID int) ([]*Domain, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return GetCustomerDomainsWithContext(ctx, db, customerID)
 }
 
 func GetCustomerDomainsWithContext(ctx context.Context, db *sql.DB, customerID int) ([]*Domain, error) {
@@ -785,6 +1005,12 @@ func VerifyDomain(db *sql.DB, id int) error {
 	return tx.Commit()
 }
 
+func RevokeCertificate(db *sql.DB, id int) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return RevokeCertificateWithContext(ctx, db, id)
+}
+
 func RevokeCertificateWithContext(ctx context.Context, db *sql.DB, id int) error {
 	if id <= 0 {
 		return fmt.Errorf("invalid certificate ID")
@@ -811,6 +1037,199 @@ func RevokeCertificateWithContext(ctx context.Context, db *sql.DB, id int) error
 	}
 
 	return tx.Commit()
+}
+
+func RevokeCertificateWithContextTx(ctx context.Context, tx *sql.Tx, id int) error {
+	if id <= 0 {
+		return fmt.Errorf("invalid certificate ID")
+	}
+
+	result, err := tx.ExecContext(ctx, revokeCertificateQuery, id)
+	if err != nil {
+		return fmt.Errorf("failed to revoke certificate: %w", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get affected rows: %w", err)
+	}
+
+	if rowsAffected == 0 {
+		return fmt.Errorf("certificate not found or already revoked")
+	}
+
+	return nil
+}
+
+func CreateIntermediateCA(db *sql.DB, ca *IntermediateCA) (int, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	if err := validateIntermediateCAInput(ca); err != nil {
+		return 0, fmt.Errorf("invalid intermediate CA data: %w", err)
+	}
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	algorithmsJSON, err := json.Marshal(ca.Algorithms)
+	if err != nil {
+		return 0, fmt.Errorf("failed to marshal algorithms: %w", err)
+	}
+
+	multiPQCCertsJSON, err := json.Marshal(ca.MultiPQCCertificates)
+	if err != nil {
+		return 0, fmt.Errorf("failed to marshal multi-PQC certificates: %w", err)
+	}
+
+	multiPQCKeysJSON, err := json.Marshal(ca.MultiPQCPrivateKeys)
+	if err != nil {
+		return 0, fmt.Errorf("failed to marshal multi-PQC private keys: %w", err)
+	}
+
+	result, err := tx.ExecContext(ctx, createIntermediateCAQuery,
+		ca.CustomerID,
+		sanitizeString(ca.CommonName),
+		sanitizeString(ca.SerialNumber),
+		ca.CertificatePEM,
+		ca.PrivateKeyPEM,
+		string(algorithmsJSON),
+		ca.IsMultiPQC,
+		ca.HasKEM,
+		string(multiPQCCertsJSON),
+		string(multiPQCKeysJSON),
+		ca.KEMPublicKeyPEM,
+		ca.KEMPrivateKeyPEM,
+		ca.Fingerprint,
+		ca.KeyID,
+		ca.MaxPathLen,
+		ca.NotBefore,
+		ca.NotAfter,
+		ca.Status)
+	if err != nil {
+		return 0, fmt.Errorf("failed to create intermediate CA: %w", err)
+	}
+
+	id, err := result.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("failed to get intermediate CA ID: %w", err)
+	}
+
+	if err = tx.Commit(); err != nil {
+		return 0, fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	ca.ID = int(id)
+	ca.CreatedAt = time.Now()
+
+	return int(id), nil
+}
+
+func GetIntermediateCA(db *sql.DB, id int) (*IntermediateCA, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if id <= 0 {
+		return nil, fmt.Errorf("invalid intermediate CA ID")
+	}
+
+	var ca IntermediateCA
+	var algorithmsJSON, multiPQCCertsJSON, multiPQCKeysJSON string
+
+	err := db.QueryRowContext(ctx, getIntermediateCAQuery, id).Scan(
+		&ca.ID, &ca.CustomerID, &ca.CommonName, &ca.SerialNumber,
+		&ca.CertificatePEM, &ca.PrivateKeyPEM,
+		&algorithmsJSON, &ca.IsMultiPQC, &ca.HasKEM,
+		&multiPQCCertsJSON, &multiPQCKeysJSON,
+		&ca.KEMPublicKeyPEM, &ca.KEMPrivateKeyPEM,
+		&ca.Fingerprint, &ca.KeyID, &ca.MaxPathLen,
+		&ca.NotBefore, &ca.NotAfter, &ca.Status,
+		&ca.CreatedAt, &ca.UpdatedAt)
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("intermediate CA not found")
+		}
+		return nil, fmt.Errorf("failed to get intermediate CA: %w", err)
+	}
+
+	if err = json.Unmarshal([]byte(algorithmsJSON), &ca.Algorithms); err != nil {
+		ca.Algorithms = []string{}
+	}
+
+	if ca.IsMultiPQC && multiPQCCertsJSON != "" {
+		if err = json.Unmarshal([]byte(multiPQCCertsJSON), &ca.MultiPQCCertificates); err != nil {
+			ca.MultiPQCCertificates = []string{}
+		}
+	}
+
+	if ca.IsMultiPQC && multiPQCKeysJSON != "" {
+		if err = json.Unmarshal([]byte(multiPQCKeysJSON), &ca.MultiPQCPrivateKeys); err != nil {
+			ca.MultiPQCPrivateKeys = []string{}
+		}
+	}
+
+	return &ca, nil
+}
+
+func GetCustomerIntermediateCAs(db *sql.DB, customerID int) ([]*IntermediateCA, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if customerID <= 0 {
+		return nil, fmt.Errorf("invalid customer ID")
+	}
+
+	rows, err := db.QueryContext(ctx, getCustomerIntermediateCAsQuery, customerID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get customer intermediate CAs: %w", err)
+	}
+	defer rows.Close()
+
+	var cas []*IntermediateCA
+	for rows.Next() {
+		var ca IntermediateCA
+		var algorithmsJSON, multiPQCCertsJSON, multiPQCKeysJSON string
+
+		err := rows.Scan(&ca.ID, &ca.CustomerID, &ca.CommonName, &ca.SerialNumber,
+			&ca.CertificatePEM, &ca.PrivateKeyPEM,
+			&algorithmsJSON, &ca.IsMultiPQC, &ca.HasKEM,
+			&multiPQCCertsJSON, &multiPQCKeysJSON,
+			&ca.KEMPublicKeyPEM, &ca.KEMPrivateKeyPEM,
+			&ca.Fingerprint, &ca.KeyID, &ca.MaxPathLen,
+			&ca.NotBefore, &ca.NotAfter, &ca.Status,
+			&ca.CreatedAt, &ca.UpdatedAt)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan intermediate CA: %w", err)
+		}
+
+		if err = json.Unmarshal([]byte(algorithmsJSON), &ca.Algorithms); err != nil {
+			ca.Algorithms = []string{}
+		}
+
+		if ca.IsMultiPQC && multiPQCCertsJSON != "" {
+			if err = json.Unmarshal([]byte(multiPQCCertsJSON), &ca.MultiPQCCertificates); err != nil {
+				ca.MultiPQCCertificates = []string{}
+			}
+		}
+
+		if ca.IsMultiPQC && multiPQCKeysJSON != "" {
+			if err = json.Unmarshal([]byte(multiPQCKeysJSON), &ca.MultiPQCPrivateKeys); err != nil {
+				ca.MultiPQCPrivateKeys = []string{}
+			}
+		}
+
+		cas = append(cas, &ca)
+	}
+
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("row iteration error: %w", err)
+	}
+
+	return cas, nil
 }
 
 func CreateAuditLog(db *sql.DB, log *AuditLog) error {
@@ -949,6 +1368,54 @@ func validateCertificateInput(cert *Certificate) error {
 	}
 	if !validStatus {
 		return fmt.Errorf("invalid certificate status")
+	}
+	
+	return nil
+}
+
+func validateIntermediateCAInput(ca *IntermediateCA) error {
+	if ca == nil {
+		return fmt.Errorf("intermediate CA cannot be nil")
+	}
+	
+	if ca.CustomerID <= 0 {
+		return fmt.Errorf("invalid customer ID")
+	}
+	
+	if len(strings.TrimSpace(ca.CommonName)) == 0 {
+		return fmt.Errorf("common name cannot be empty")
+	}
+	
+	if len(ca.CommonName) > 64 {
+		return fmt.Errorf("common name too long")
+	}
+	
+	if len(strings.TrimSpace(ca.SerialNumber)) == 0 {
+		return fmt.Errorf("serial number cannot be empty")
+	}
+	
+	if len(ca.CertificatePEM) == 0 {
+		return fmt.Errorf("certificate PEM cannot be empty")
+	}
+	
+	if len(ca.PrivateKeyPEM) == 0 {
+		return fmt.Errorf("private key PEM cannot be empty")
+	}
+	
+	if ca.NotAfter.Before(ca.NotBefore) {
+		return fmt.Errorf("invalid certificate validity period")
+	}
+	
+	validStatuses := []string{"active", "revoked", "expired"}
+	validStatus := false
+	for _, status := range validStatuses {
+		if ca.Status == status {
+			validStatus = true
+			break
+		}
+	}
+	if !validStatus {
+		return fmt.Errorf("invalid intermediate CA status")
 	}
 	
 	return nil

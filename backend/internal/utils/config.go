@@ -68,6 +68,7 @@ type Config struct {
 	DefaultMultiPQCAlgorithms   []string
 	MinSecurityLevel            int
 	AllowedAlgorithms           []string
+	MaxWorkers                  int
 }
 
 func LoadConfig() (*Config, error) {
@@ -123,6 +124,7 @@ func LoadConfig() (*Config, error) {
 		EnableMultiPQC:              getEnvBool("ENABLE_MULTI_PQC", true),
 		DefaultMultiPQCAlgorithms:   []string{"dilithium3", "falcon1024", "sphincs-sha256-256f"},
 		MinSecurityLevel:            getEnvInt("MIN_SECURITY_LEVEL", 128),
+		MaxWorkers:                  getEnvInt("MAX_WORKERS", 10),
 		AllowedAlgorithms: []string{
 			"dilithium2", "dilithium3", "dilithium5",
 			"falcon512", "falcon1024",
@@ -293,6 +295,10 @@ func (c *Config) validate() error {
 
 	if c.MinSecurityLevel < 128 {
 		return fmt.Errorf("minimum security level must be at least 128 bits")
+	}
+
+	if c.MaxWorkers < 1 || c.MaxWorkers > 100 {
+		return fmt.Errorf("invalid max workers: %d", c.MaxWorkers)
 	}
 
 	return nil
