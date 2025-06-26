@@ -33,30 +33,6 @@ const StatusBadge: React.FC<StatusBadgeProps> = ({
     }
   };
 
-  const getStatusVariant = (status: string) => {
-    const lowerStatus = status.toLowerCase();
-    
-    if (['issued', 'verified', 'active', 'healthy', 'up'].includes(lowerStatus)) {
-      return 'success';
-    }
-    
-    if (['pending', 'expiring', 'degraded'].includes(lowerStatus)) {
-      return 'warning';
-    }
-    
-    if (['expired', 'revoked', 'failed', 'suspended', 'unhealthy', 'down'].includes(lowerStatus)) {
-      return 'danger';
-    }
-    
-    if (['info', 'ready'].includes(lowerStatus)) {
-      return 'info';
-    }
-    
-    return 'default';
-  };
-
-  const finalVariant = variant === 'default' ? getStatusVariant(status) : variant;
-
   return (
     <span
       className={classNames(

@@ -8,82 +8,79 @@ import {
   DocumentTextIcon,
   UsersIcon,
   CheckCircleIcon,
-  ClockIcon,
+  BuildingLibraryIcon,
+  GlobeAltIcon,
+  ExclamationTriangleIcon,
+  ShieldCheckIcon,
 } from '@heroicons/react/24/outline';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
 
 const Dashboard: React.FC = () => {
-  const { data: healthData, loading: healthLoading, error: healthError } = useApi(() => apiService.getHealth());
-  const { data: metricsData, loading: metricsLoading, error: metricsError } = useApi(() => apiService.getHealthMetrics());
-  const { data: certificatesData, loading: certLoading, error: certError } = useApi(() => 
-    apiService.getCertificates({ page_size: 5 })
-  );
+  const { data: healthData, loading: healthLoading } = useApi(() => apiService.getHealth());
+  const { data: metricsData, loading: metricsLoading } = useApi(() => apiService.getHealthMetrics());
+  const { data: analyticsData, loading: analyticsLoading } = useApi(() => apiService.getAnalyticsDashboard());
+  const { data: expiringCerts } = useApi(() => apiService.getExpiringCertificates(30));
 
-  const loading = healthLoading || metricsLoading || certLoading;
+  const loading = healthLoading || metricsLoading || analyticsLoading;
 
   const dashboardCards = [
     {
       title: 'Active Certificates',
-      value: metricsData?.active_certificates || 0,
+      value: analyticsData?.summary?.active_certificates || metricsData?.active_certificates || 0,
       icon: DocumentTextIcon,
       color: 'text-blue-600',
       bgColor: 'bg-blue-100',
+      change: analyticsData?.summary?.certificates_issued_24h || 0,
     },
     {
       title: 'Total Customers',
-      value: metricsData?.total_customers || 0,
+      value: analyticsData?.summary?.total_customers || metricsData?.total_customers || 0,
       icon: UsersIcon,
       color: 'text-green-600',
       bgColor: 'bg-green-100',
     },
     {
-      title: 'Database Connections',
-      value: metricsData?.database_connections || 0,
-      icon: CheckCircleIcon,
+      title: 'Expiring Soon',
+      value: analyticsData?.summary?.expiring_soon || 0,
+      icon: ExclamationTriangleIcon,
+      color: 'text-yellow-600',
+      bgColor: 'bg-yellow-100',
+    },
+    {
+      title: 'Intermediate CAs',
+      value: analyticsData?.summary?.intermediate_cas || 0,
+      icon: BuildingLibraryIcon,
       color: 'text-purple-600',
       bgColor: 'bg-purple-100',
     },
     {
-      title: 'System Status',
-      value: healthData?.status || 'Unknown',
-      icon: ClockIcon,
+      title: 'Verified Domains',
+      value: analyticsData?.summary?.domains_validated || 0,
+      icon: GlobeAltIcon,
       color: 'text-indigo-600',
       bgColor: 'bg-indigo-100',
     },
+    {
+      title: 'System Status',
+      value: healthData?.status || 'Unknown',
+      icon: ShieldCheckIcon,
+      color: 'text-emerald-600',
+      bgColor: 'bg-emerald-100',
+    },
   ];
 
-  const chartData = [
-    { name: 'Jan', certificates: 120, domains: 85 },
-    { name: 'Feb', certificates: 135, domains: 92 },
-    { name: 'Mar', certificates: 148, domains: 98 },
-    { name: 'Apr', certificates: 162, domains: 105 },
-    { name: 'May', certificates: 175, domains: 112 },
-    { name: 'Jun', certificates: 188, domains: 118 },
-  ];
+  const certificateStatusData = analyticsData?.certificates_by_status ? 
+    Object.entries(analyticsData.certificates_by_status).map(([status, count]) => ({
+      name: status.charAt(0).toUpperCase() + status.slice(1),
+      value: count,
+    })) : [];
+
+  const COLORS = ['#0ea5e9', '#22c55e', '#f59e0b', '#ef4444', '#8b5cf6'];
 
   if (loading) {
     return (
       <div className="flex items-center justify-center min-h-96">
         <LoadingSpinner size="lg" text="Loading dashboard..." />
-      </div>
-    );
-  }
-
-  if (healthError || metricsError || certError) {
-    return (
-      <div className="flex items-center justify-center min-h-96">
-        <div className="text-center">
-          <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-2">Error Loading Dashboard</h2>
-          <p className="text-gray-600 dark:text-gray-400">
-            {healthError || metricsError || certError}
-          </p>
-          <button 
-            onClick={() => window.location.reload()} 
-            className="mt-4 btn-primary"
-          >
-            Retry
-          </button>
-        </div>
       </div>
     );
   }
@@ -100,7 +97,7 @@ const Dashboard: React.FC = () => {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
         {dashboardCards.map((card, index) => (
           <div key={index} className="card">
             <div className="card-body">
@@ -115,6 +112,11 @@ const Dashboard: React.FC = () => {
                   <p className="text-2xl font-bold text-gray-900 dark:text-white">
                     {typeof card.value === 'number' ? formatNumber(card.value) : card.value}
                   </p>
+                  {card.change !== undefined && card.change > 0 && (
+                    <p className="text-sm text-green-600 dark:text-green-400">
+                      +{card.change} today
+                    </p>
+                  )}
                 </div>
               </div>
             </div>
@@ -126,39 +128,75 @@ const Dashboard: React.FC = () => {
         <div className="card">
           <div className="card-header">
             <h3 className="text-lg font-medium text-gray-900 dark:text-white">
-              Certificate Growth
+              Certificate Expiration Trends
             </h3>
           </div>
           <div className="card-body">
-            <ResponsiveContainer width="100%" height={300}>
-              <LineChart data={chartData}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis dataKey="name" />
-                <YAxis />
-                <Tooltip />
-                <Line 
-                  type="monotone" 
-                  dataKey="certificates" 
-                  stroke="#0ea5e9" 
-                  strokeWidth={2}
-                  name="Certificates"
-                />
-                <Line 
-                  type="monotone" 
-                  dataKey="domains" 
-                  stroke="#22c55e" 
-                  strokeWidth={2}
-                  name="Domains"
-                />
-              </LineChart>
-            </ResponsiveContainer>
+            {analyticsData?.expiration_trends && analyticsData.expiration_trends.length > 0 ? (
+              <ResponsiveContainer width="100%" height={300}>
+                <LineChart data={analyticsData.expiration_trends}>
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis dataKey="date" />
+                  <YAxis />
+                  <Tooltip />
+                  <Line 
+                    type="monotone" 
+                    dataKey="count" 
+                    stroke="#0ea5e9" 
+                    strokeWidth={2}
+                    name="Expiring Certificates"
+                  />
+                </LineChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="flex items-center justify-center h-64 text-gray-500">
+                No expiration data available
+              </div>
+            )}
           </div>
         </div>
 
         <div className="card">
           <div className="card-header">
             <h3 className="text-lg font-medium text-gray-900 dark:text-white">
-              System Status
+              Certificate Status Distribution
+            </h3>
+          </div>
+          <div className="card-body">
+            {certificateStatusData.length > 0 ? (
+              <ResponsiveContainer width="100%" height={300}>
+                <PieChart>
+                  <Pie
+                    data={certificateStatusData}
+                    cx="50%"
+                    cy="50%"
+                    labelLine={false}
+                    label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}
+                    outerRadius={80}
+                    fill="#8884d8"
+                    dataKey="value"
+                  >
+                    {certificateStatusData.map((entry, index) => (
+                      <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                    ))}
+                  </Pie>
+                  <Tooltip />
+                </PieChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="flex items-center justify-center h-64 text-gray-500">
+                No certificate data available
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div className="card">
+          <div className="card-header">
+            <h3 className="text-lg font-medium text-gray-900 dark:text-white">
+              System Health
             </h3>
           </div>
           <div className="card-body space-y-4">
@@ -181,46 +219,86 @@ const Dashboard: React.FC = () => {
                   <span className="text-gray-600 dark:text-gray-400">Version</span>
                   <span className="font-medium">{healthData.version || 'Unknown'}</span>
                 </div>
+                <div className="flex justify-between text-sm">
+                  <span className="text-gray-600 dark:text-gray-400">Database Connections</span>
+                  <span className="font-medium">{metricsData?.database_connections || 0}</span>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="card">
+          <div className="card-header">
+            <h3 className="text-lg font-medium text-gray-900 dark:text-white">
+              Certificates Expiring Soon
+            </h3>
+          </div>
+          <div className="card-body">
+            {expiringCerts?.certificates && expiringCerts.certificates.length > 0 ? (
+              <div className="space-y-3">
+                {expiringCerts.certificates.slice(0, 5).map((cert: any) => (
+                  <div key={cert.id} className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700 rounded-lg">
+                    <div>
+                      <p className="font-medium text-gray-900 dark:text-white">
+                        {cert.common_name}
+                      </p>
+                      <p className="text-sm text-gray-600 dark:text-gray-400">
+                        Expires in {cert.days_left} days
+                      </p>
+                    </div>
+                    <StatusBadge 
+                      status={cert.days_left <= 7 ? 'critical' : cert.days_left <= 30 ? 'warning' : 'good'} 
+                    />
+                  </div>
+                ))}
+                {expiringCerts.total > 5 && (
+                  <div className="text-center text-sm text-gray-500 dark:text-gray-400">
+                    And {expiringCerts.total - 5} more certificates expiring soon
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="text-center py-8">
+                <CheckCircleIcon className="mx-auto h-12 w-12 text-green-400" />
+                <h3 className="mt-2 text-sm font-medium text-gray-900 dark:text-white">No certificates expiring soon</h3>
+                <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                  All certificates are valid for more than 30 days.
+                </p>
               </div>
             )}
           </div>
         </div>
       </div>
 
-      <div className="card">
-        <div className="card-header">
-          <h3 className="text-lg font-medium text-gray-900 dark:text-white">
-            Recent Certificates
-          </h3>
-        </div>
-        <div className="card-body">
-          {certificatesData?.data && certificatesData.data.length > 0 ? (
+      {analyticsData?.recent_activity && analyticsData.recent_activity.length > 0 && (
+        <div className="card">
+          <div className="card-header">
+            <h3 className="text-lg font-medium text-gray-900 dark:text-white">
+              Recent Activity
+            </h3>
+          </div>
+          <div className="card-body">
             <div className="space-y-3">
-              {certificatesData.data.map((cert) => (
-                <div key={cert.id} className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700 rounded-lg">
+              {analyticsData.recent_activity.slice(0, 10).map((activity: { description: string | number | boolean | React.ReactElement<any, string | React.JSXElementConstructor<any>> | Iterable<React.ReactNode> | React.ReactPortal | null | undefined; timestamp: string | Date; type: string | number | boolean | React.ReactElement<any, string | React.JSXElementConstructor<any>> | Iterable<React.ReactNode> | React.ReactPortal | null | undefined; }, index: React.Key | null | undefined) => (
+                <div key={index} className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700 rounded-lg">
                   <div>
                     <p className="font-medium text-gray-900 dark:text-white">
-                      {cert.common_name}
+                      {activity.description}
                     </p>
                     <p className="text-sm text-gray-600 dark:text-gray-400">
-                      Valid until: {new Date(cert.not_after).toLocaleDateString()}
+                      {formatRelativeTime(activity.timestamp)}
                     </p>
                   </div>
-                  <StatusBadge status={cert.status} />
+                  <span className="px-2 py-1 text-xs font-medium bg-blue-100 dark:bg-blue-900 text-blue-800 dark:text-blue-200 rounded">
+                    {activity.type}
+                  </span>
                 </div>
               ))}
             </div>
-          ) : (
-            <div className="text-center py-8">
-              <DocumentTextIcon className="mx-auto h-12 w-12 text-gray-400" />
-              <h3 className="mt-2 text-sm font-medium text-gray-900 dark:text-white">No certificates</h3>
-              <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-                No certificates have been issued yet.
-              </p>
-            </div>
-          )}
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 };

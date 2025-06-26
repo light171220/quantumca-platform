@@ -36,7 +36,6 @@ class ApiService {
   private setupInterceptors() {
     this.client.interceptors.request.use(
       (config) => {
-        // For protected routes, use the original API key, not the JWT token
         const apiKey = localStorage.getItem('api_key');
         if (apiKey) {
           config.headers.Authorization = `Bearer ${apiKey}`;
@@ -50,7 +49,6 @@ class ApiService {
       (response) => response,
       async (error) => {
         if (error.response?.status === 401) {
-          // Clear auth data and redirect to login
           localStorage.removeItem('auth_token');
           localStorage.removeItem('refresh_token');
           localStorage.removeItem('api_key');
@@ -63,7 +61,6 @@ class ApiService {
 
   async login(request: { api_key: string }): Promise<AuthResponse> {
     const response = await this.client.post<AuthResponse>('/auth/login', request);
-    // Store the original API key for future API calls
     localStorage.setItem('api_key', request.api_key);
     return response.data;
   }
@@ -116,9 +113,8 @@ class ApiService {
     };
   }
 
-  async verifyDomain(id: string): Promise<Domain> {
-    const response = await this.client.post<Domain>(`/domains/${id}/verify`);
-    return response.data;
+  async verifyDomain(id: string): Promise<void> {
+    await this.client.post(`/domains/${id}/verify`);
   }
 
   async deleteDomain(id: string): Promise<void> {
@@ -130,17 +126,17 @@ class ApiService {
     const domain = response.data;
     
     return {
-      domain: domain.domain,
-      validationType: domain.validationType,
+      domain: domain.domain_name,
+      validationType: domain.validation_method,
       instructions: {
-        dnsRecord: domain.validationType === 'dns-txt' ? {
+        dnsRecord: domain.dns_challenge ? {
           type: 'TXT',
-          name: `_quantumca-challenge.${domain.domain}`,
-          value: domain.validationToken
+          name: domain.dns_challenge.record_name,
+          value: domain.dns_challenge.record_value
         } : undefined,
-        httpFile: domain.validationType === 'http-01' ? {
-          path: `/.well-known/acme-challenge/${domain.validationToken}`,
-          content: domain.validationToken
+        httpFile: domain.http_challenge ? {
+          path: domain.http_challenge.path,
+          content: domain.http_challenge.content
         } : undefined
       }
     };
@@ -180,7 +176,7 @@ class ApiService {
   }
 
   async revokeCertificate(id: string, reason?: string): Promise<void> {
-    await this.client.post(`/certificates/${id}/revoke`);
+    await this.client.post(`/certificates/${id}/revoke`, { reason });
   }
 
   async renewCertificate(id: string): Promise<Certificate> {
@@ -193,6 +189,61 @@ class ApiService {
       params: { format },
       responseType: 'blob',
     });
+    return response.data;
+  }
+
+  async batchIssueCertificates(requests: CreateCertificateRequest[]): Promise<any> {
+    const response = await this.client.post('/certificates/batch', {
+      requests: requests.map(req => ({
+        common_name: req.domains[0],
+        subject_alt_names: req.domains.slice(1),
+        validity_days: req.validityPeriod,
+        template_id: req.templateId ? parseInt(req.templateId) : 1,
+        algorithm: req.algorithm.toLowerCase(),
+        use_multi_pqc: false
+      }))
+    });
+    return response.data;
+  }
+
+  async batchRevokeCertificates(certificateIds: string[], reason?: string): Promise<any> {
+    const response = await this.client.post('/certificates/batch-revoke', {
+      certificate_ids: certificateIds.map(id => parseInt(id)),
+      reason: reason || 'user_requested'
+    });
+    return response.data;
+  }
+
+  async getExpiringCertificates(days: number = 30): Promise<any> {
+    const response = await this.client.get('/certificates/expiring', {
+      params: { days }
+    });
+    return response.data;
+  }
+
+  async bulkExportCertificates(certificateIds: string[], format: string): Promise<any> {
+    const response = await this.client.post('/certificates/bulk-export', {
+      certificate_ids: certificateIds.map(id => parseInt(id)),
+      format
+    });
+    return response.data;
+  }
+
+  async getCertificateChain(id: string): Promise<any> {
+    const response = await this.client.get(`/certificates/${id}/chain`);
+    return response.data;
+  }
+
+  async exportPKCS12(id: string, password?: string): Promise<Blob> {
+    const response = await this.client.get(`/certificates/${id}/pkcs12`, {
+      params: password ? { password } : {},
+      responseType: 'blob'
+    });
+    return response.data;
+  }
+
+  async exportMultipleFormats(id: string, formats: string[]): Promise<any> {
+    const response = await this.client.post(`/certificates/${id}/formats`, { formats });
     return response.data;
   }
 
@@ -215,16 +266,22 @@ class ApiService {
       organization: 'QuantumCA',
       organizational_unit: 'IT Department',
       validity_days: request.validityPeriod,
-      algorithm: 'dilithium5',
+      algorithm: 'dilithium3',
       use_multi_pqc: true,
       max_path_len: 0
     });
     return response.data;
   }
 
-  async getIntermediateCAs(): Promise<IntermediateCA[]> {
-    const response = await this.client.get<IntermediateCA[]>('/intermediate-ca');
-    return response.data;
+  async getIntermediateCAs(params?: { page?: number; page_size?: number; status?: string }): Promise<PaginatedResponse<IntermediateCA>> {
+    const response = await this.client.get<{ intermediate_cas: IntermediateCA[]; total: number; page: number; page_size: number; total_pages: number }>('/intermediate-ca', { params });
+    return {
+      data: response.data.intermediate_cas,
+      total: response.data.total,
+      page: response.data.page,
+      limit: response.data.page_size,
+      totalPages: response.data.total_pages
+    };
   }
 
   async getIntermediateCA(id: string): Promise<IntermediateCA> {
@@ -240,7 +297,9 @@ class ApiService {
     page?: number;
     page_size?: number;
     action?: string;
+    resource?: string;
     from?: string;
+    to?: string;
   }): Promise<PaginatedResponse<AuditLog>> {
     const response = await this.client.get<{ logs: AuditLog[]; total: number; page: number; page_size: number; total_pages: number }>('/audit-logs', { params });
     return {
@@ -257,23 +316,119 @@ class ApiService {
     return response.data;
   }
 
-  async getHealth(): Promise<HealthStatus> {
-    const healthClient = axios.create({
-      baseURL: process.env.REACT_APP_HEALTH_URL || 'http://localhost:8080/health',
-      timeout: 10000,
+  async getRootCAInfo(): Promise<any> {
+    const response = await this.client.get('/ca/root/info');
+    return response.data;
+  }
+
+  async getIntermediateCAInfo(): Promise<any> {
+    const response = await this.client.get('/ca/intermediate/info');
+    return response.data;
+  }
+
+  async getCertificateChainInfo(): Promise<any> {
+    const response = await this.client.get('/ca/chain');
+    return response.data;
+  }
+
+  async getSupportedAlgorithms(): Promise<any> {
+    const response = await this.client.get('/ca/algorithms');
+    return response.data;
+  }
+
+  async downloadCRL(): Promise<Blob> {
+    const response = await this.client.get('/crl', {
+      responseType: 'blob'
     });
-    
-    const response = await healthClient.get<HealthStatus>('/');
+    return response.data;
+  }
+
+  async getCRLInfo(): Promise<any> {
+    const response = await this.client.get('/crl/info');
+    return response.data;
+  }
+
+  async generateCRL(force: boolean = false): Promise<any> {
+    const response = await this.client.post('/crl/generate', { force });
+    return response.data;
+  }
+
+  async checkOCSPStatus(serialNumber: string): Promise<any> {
+    const response = await this.client.get(`/ocsp/status/${serialNumber}`);
+    return response.data;
+  }
+
+  async batchCheckOCSPStatus(serialNumbers: string[]): Promise<any> {
+    const response = await this.client.post('/certificates/batch-ocsp-check', {
+      serial_numbers: serialNumbers
+    });
+    return response.data;
+  }
+
+  async getOCSPHealth(): Promise<any> {
+    const response = await this.client.get('/ocsp/responder/health');
+    return response.data;
+  }
+
+  async getOCSPStats(): Promise<any> {
+    const response = await this.client.get('/ocsp/responder/stats');
+    return response.data;
+  }
+
+  async getOCSPConfig(): Promise<any> {
+    const response = await this.client.get('/ocsp/responder/config');
+    return response.data;
+  }
+
+  async getAnalyticsDashboard(): Promise<any> {
+    const response = await this.client.get('/analytics/dashboard');
+    return response.data;
+  }
+
+  async getExpirationReport(): Promise<any> {
+    const response = await this.client.get('/analytics/expiration-report');
+    return response.data;
+  }
+
+  async getAlgorithmUsage(): Promise<any> {
+    const response = await this.client.get('/analytics/algorithm-usage');
+    return response.data;
+  }
+
+  async getRevocationStats(): Promise<any> {
+    const response = await this.client.get('/analytics/revocation-stats');
+    return response.data;
+  }
+
+  async getCertificateStatus(id: string): Promise<any> {
+    const response = await this.client.get(`/certificates/${id}/status`);
+    return response.data;
+  }
+
+  async bulkRenewCertificates(certificateIds: string[]): Promise<any> {
+    const response = await this.client.post('/certificates/bulk-renew', {
+      certificate_ids: certificateIds.map(id => parseInt(id))
+    });
+    return response.data;
+  }
+
+  async getHealth(): Promise<HealthStatus> {
+    const response = await this.client.get<HealthStatus>('/health');
     return response.data;
   }
 
   async getHealthMetrics(): Promise<SystemMetrics> {
-    const healthClient = axios.create({
-      baseURL: process.env.REACT_APP_HEALTH_URL || 'http://localhost:8080/health',
-      timeout: 10000,
-    });
-    
-    const response = await healthClient.get<SystemMetrics>('/metrics');
+    const response = await this.client.get<SystemMetrics>('/health/metrics');
+    return response.data;
+  }
+
+  async getLiveness(): Promise<any> {
+    const response = await this.client.get('/health/live');
+    return response.data;
+  }
+
+  async getReadiness(): Promise<any> {
+    const response = await this.client.get('/health/ready');
     return response.data;
   }
 

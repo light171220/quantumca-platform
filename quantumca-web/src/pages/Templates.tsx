@@ -4,6 +4,7 @@ import { apiService } from '../services/api';
 import { CertificateTemplate } from '../types/api';
 import StatusBadge from '../components/StatusBadge';
 import Modal from '../components/Modal';
+import LoadingSpinner from '../components/LoadingSpinner';
 import { DocumentTextIcon } from '@heroicons/react/24/outline';
 
 const Templates: React.FC = () => {
@@ -11,6 +12,14 @@ const Templates: React.FC = () => {
   const [selectedTemplate, setSelectedTemplate] = useState<CertificateTemplate | null>(null);
 
   const { data: templatesData, loading } = useApi(() => apiService.getTemplates());
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center min-h-96">
+        <LoadingSpinner size="lg" text="Loading templates..." />
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -44,13 +53,19 @@ const Templates: React.FC = () => {
                     {template.description}
                   </p>
                 </div>
-                <StatusBadge status={template.status === 'active' ? 'active' : 'inactive'} size="sm" />
+                <StatusBadge 
+                  status={template.status} 
+                  variant={template.status === 'active' ? 'success' : 'default'}
+                  size="sm" 
+                />
               </div>
               
               <div className="space-y-2">
                 <div className="flex justify-between text-sm">
                   <span className="text-gray-500 dark:text-gray-400">Key Usage:</span>
-                  <span className="font-medium">{template.key_usages.join(', ')}</span>
+                  <span className="font-medium text-right">
+                    {template.key_usages.length > 0 ? template.key_usages.join(', ') : 'None'}
+                  </span>
                 </div>
                 <div className="flex justify-between text-sm">
                   <span className="text-gray-500 dark:text-gray-400">Max Validity:</span>
@@ -91,7 +106,10 @@ const Templates: React.FC = () => {
               </div>
               <div>
                 <label className="form-label">Status</label>
-                <StatusBadge status={selectedTemplate.status === 'active' ? 'active' : 'inactive'} />
+                <StatusBadge 
+                  status={selectedTemplate.status}
+                  variant={selectedTemplate.status === 'active' ? 'success' : 'default'}
+                />
               </div>
               <div className="col-span-2">
                 <label className="form-label">Description</label>
@@ -111,18 +129,34 @@ const Templates: React.FC = () => {
                 <label className="form-label">Is CA</label>
                 <p className="text-sm text-gray-900 dark:text-white">{selectedTemplate.is_ca ? 'Yes' : 'No'}</p>
               </div>
-              <div>
+              {selectedTemplate.path_length !== undefined && selectedTemplate.path_length !== null && (
+                <div>
+                  <label className="form-label">Path Length</label>
+                  <p className="text-sm text-gray-900 dark:text-white">{selectedTemplate.path_length}</p>
+                </div>
+              )}
+              <div className="col-span-2">
                 <label className="form-label">Key Usages</label>
                 <p className="text-sm text-gray-900 dark:text-white">
-                  {selectedTemplate.key_usages.join(', ')}
+                  {selectedTemplate.key_usages.length > 0 ? selectedTemplate.key_usages.join(', ') : 'None specified'}
                 </p>
               </div>
-              <div>
+              <div className="col-span-2">
                 <label className="form-label">Extended Key Usages</label>
                 <p className="text-sm text-gray-900 dark:text-white">
-                  {selectedTemplate.ext_key_usages.join(', ')}
+                  {selectedTemplate.ext_key_usages.length > 0 ? selectedTemplate.ext_key_usages.join(', ') : 'None specified'}
                 </p>
               </div>
+              {selectedTemplate.policies && Object.keys(selectedTemplate.policies).length > 0 && (
+                <div className="col-span-2">
+                  <label className="form-label">Policies</label>
+                  <div className="bg-gray-50 dark:bg-gray-700 rounded-lg p-3">
+                    <pre className="text-sm text-gray-900 dark:text-white whitespace-pre-wrap">
+                      {JSON.stringify(selectedTemplate.policies, null, 2)}
+                    </pre>
+                  </div>
+                </div>
+              )}
             </div>
 
             <div className="flex justify-end">
